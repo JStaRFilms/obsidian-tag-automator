@@ -1,0 +1,1499 @@
+import os
+import re
+import json
+import time # Import the time module
+import random # Import the random module for jitter
+from pathlib import Path
+from dotenv import load_dotenv
+from tag_extractor import ObsidianTagExtractor
+
+# Load environment variables from .env in the project root
+load_dotenv(Path(__file__).parent / '.env')
+try:
+    import google.generativeai as genai
+    from google.generativeai.types import BlockedPromptException, StopCandidateException
+except Exception:
+    genai = None
+    class BlockedPromptException(Exception):
+        pass
+    class StopCandidateException(Exception):
+        pass
+import yaml # Import PyYAML for robust YAML parsing
+
+class ObsidianTagAutomator:
+    """
+    Automates tag management within an Obsidian vault, including AI-driven tag suggestions,
+    tag cleaning, aliasing, exclusion, renaming, merging, and validation.
+
+    It interacts with Markdown files' YAML front matter to read and update tags,
+    and uses a Gemini AI model for intelligent tag suggestions.
+    """
+    def __init__(self, vault_path, gemini_api_key=None):
+        """
+        Initializes the ObsidianTagAutomator with the vault path and an optional Gemini API key.
+
+        Args:
+            vault_path (str or Path): The root path of the Obsidian vault.
+            gemini_api_key (str, optional): API key for Google Gemini. If not provided,
+                                            AI tag suggestions will be unavailable.
+        """
+        # Load environment variables from .env in the project root if not already loaded
+        if not os.getenv('GEMINI_API_KEY'):
+            load_dotenv(Path(__file__).parent / '.env')
+            
+        self.vault_path = Path(vault_path)
+        self.tag_extractor = ObsidianTagExtractor(vault_path)
+        
+        # Configure Gemini AI model if API key is provided or present in environment
+        if not gemini_api_key:
+            gemini_api_key = os.getenv("GEMINI_API_KEY")
+        if gemini_api_key and genai is not None:
+            try:
+                genai.configure(api_key=gemini_api_key)
+                # Using gemini-2.5-flash as it's generally available and cost-effective
+                self.gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+            except Exception as e:
+                self.gemini_model = None
+                print(f"Warning: Failed to configure Gemini API: {e}. AI tag suggestions will not be available.")
+        elif gemini_api_key and genai is None:
+            self.gemini_model = None
+            print("Warning: google-generativeai package not installed. AI tag suggestions will not be available.")
+        else:
+            self.gemini_model = None
+            print("Warning: Gemini API key not provided. AI tag suggestions will not be available.")
+        
+        # Define paths for configuration and tag databases
+        self.tags_database_path = self.vault_path / "tags_database.json"
+        self.config_path = self.vault_path / "automator_config.json"
+        
+        # Load existing tag aliases and automator configuration
+        self.tag_aliases = self._load_tag_aliases()
+        self.config = self._load_config()
+        
+        # Initialize AI prompt and exclusion lists from configuration
+        self.ai_prompt = self.config.get('ai_prompt', self._default_ai_prompt())
+        # Ensure excluded_tags and excluded_paths are always sets for efficient lookups
+        self.excluded_tags = set(self.config.get('excluded_tags', []))
+        self.excluded_paths = set(self.config.get('excluded_paths', []))
+
+    def _default_ai_prompt(self):
+        """
+        Returns the default AI prompt string used for generating tag suggestions.
+        This prompt guides the Gemini model on how to analyze document content
+        and suggest relevant, properly formatted tags from the vault's existing tags.
+        """
+        return """
+You are an AI assistant for tagging Obsidian Markdown files. Your goal is to suggest relevant tags for a given document.
+
+Document content:
+---
+{file_content}
+---
+
+Existing tags in the vault:
+{all_existing_tags_csv}
+
+Tags already present in this file (do NOT repeat these):
+{existing_tags_csv}
+
+Instructions:
+- Suggest up to 15 highly relevant tags.
+- Prefer tags from the existing vault list when suitable; otherwise propose concise, descriptive new tags.
+- IMPORTANT: Tags must be lowercase, no spaces or periods. Use hyphens for multi-word tags (e.g., nextjs, ai-integration).
+- Return ONLY a comma-separated list of tags. No extra text.
+"""
+
+    def _load_config(self):
+        """
+        Loads the automator configuration from `automator_config.json`.
+        Initializes with empty lists for excluded tags and paths if the file does not exist.
+
+        Returns:
+            dict: The loaded configuration data.
+        """
+        if self.config_path.exists():
+            with open(self.config_path, 'r', encoding='utf-8') as f:
+                config_data = json.load(f)
+                # Ensure exclusion lists are sets for efficient lookup
+                config_data['excluded_tags'] = list(set(config_data.get('excluded_tags', [])))
+                config_data['excluded_paths'] = list(set(config_data.get('excluded_paths', [])))
+                return config_data
+        return {'excluded_tags': [], 'excluded_paths': []} # Initialize with empty lists if no config
+
+    def _save_config(self):
+        """
+        Saves the current automator configuration to `automator_config.json`.
+        Ensures that `excluded_tags` and `excluded_paths` are saved as lists.
+        """
+        # Ensure excluded_tags and excluded_paths are saved as lists
+        self.config['excluded_tags'] = list(self.excluded_tags)
+        self.config['excluded_paths'] = list(self.excluded_paths)
+        with open(self.config_path, 'w', encoding='utf-8') as f:
+            json.dump(self.config, f, indent=2)
+        print(f"Configuration saved to {self.config_path}")
+
+    def get_ai_prompt(self):
+        """
+        Retrieves the current AI prompt string used for tag suggestions.
+
+        Returns:
+            str: The current AI prompt.
+        """
+        return self.ai_prompt
+
+    def set_ai_prompt(self, new_prompt):
+        """
+        Sets a new AI prompt string and saves it to the configuration file.
+
+        Args:
+            new_prompt (str): The new AI prompt string to be set.
+        """
+        self.ai_prompt = new_prompt
+        self.config['ai_prompt'] = new_prompt
+        self._save_config()
+
+    def _generate_suggested_aliases(self):
+        """
+        Generates suggested tag aliases by comparing all existing tags in the vault.
+        It identifies potential aliases where a longer tag contains a shorter tag,
+        and the difference is primarily due to common prefixes, suffixes, or hyphens.
+        This heuristic aims to suggest canonical forms for similar tags (e.g., 'nextjs' for 'next-js').
+
+        The method leverages the comprehensive list of all tags from `_get_all_tags_from_vault`
+        to ensure suggestions are based on the most current and complete set of tags.
+
+        Returns:
+            dict: A dictionary where keys are suggested alias tags (longer forms)
+                  and values are their corresponding canonical tags (shorter forms).
+        """
+        self._update_tag_database() # Ensure tag database is fresh
+        all_tags = self._load_tags_database()
+        suggested_aliases = {}
+        
+        # Sort tags by length to process shorter tags first as potential canonical forms
+        sorted_tags = sorted(all_tags, key=len)
+
+        common_affixes = [
+            '-ai', '-app', '-tool', '-system', '-bot', '-google', '-microsoft', '-openai', '-js', '-dev', '-web',
+            'google-', 'microsoft-', 'apple-', 'amazon-', 'aws-', 'azure-', 'ibm-', 'meta-', 'open-', 'gen-', 'ai-', 'web-', 'dev-',
+            'data-', 'tech-', 'design-', 'video-', 'content-', 'marketing-', 'business-', 'personal-', 'project-', 'creative-'
+        ] # Added more common prefixes and suffixes
+
+        for i, shorter_tag in enumerate(sorted_tags):
+            for j, longer_tag in enumerate(sorted_tags):
+                if i >= j: # Ensure longer_tag is actually longer or different
+                    continue
+
+                # Check if shorter_tag is a substring of longer_tag
+                if shorter_tag in longer_tag:
+                    # Calculate the parts before and after the shorter_tag
+                    parts = longer_tag.split(shorter_tag, 1) # Split only on the first occurrence
+                    prefix = parts[0]
+                    suffix = parts[1] if len(parts) > 1 else ''
+
+                    # Check if the prefix or suffix is a common affix or just a hyphen
+                    is_alias_candidate = False
+                    
+                    # Case 1: Shorter tag is at the beginning (no prefix)
+                    if not prefix:
+                        if not suffix or suffix.startswith('-') or suffix in common_affixes:
+                            is_alias_candidate = True
+                    # Case 2: Shorter tag is at the end (no suffix)
+                    elif not suffix:
+                        if not prefix or prefix.endswith('-') or prefix in common_affixes:
+                            is_alias_candidate = True
+                    # Case 3: Shorter tag is in the middle (both prefix and suffix)
+                    else:
+                        if (prefix.endswith('-') or prefix in common_affixes) and \
+                           (suffix.startswith('-') or suffix in common_affixes):
+                            is_alias_candidate = True
+
+                    # Add a length difference constraint to avoid overly broad matches
+                    # Increased max length difference slightly to accommodate longer prefixes/suffixes
+                    if is_alias_candidate and len(longer_tag) - len(shorter_tag) <= 10:
+                        # Ensure we don't overwrite a more specific alias if one already exists
+                        if longer_tag not in suggested_aliases:
+                            suggested_aliases[longer_tag] = shorter_tag
+        return suggested_aliases
+
+    def _save_tag_aliases(self, aliases):
+        """
+        Saves the provided tag aliases dictionary to `tag_aliases.json`.
+
+        This method is responsible for persisting the current state of tag aliases
+        to a JSON file, ensuring that alias mappings are preserved across sessions.
+
+        Args:
+            aliases (dict): A dictionary where keys are alias tags (the forms to be replaced)
+                            and values are their corresponding canonical tags (the preferred forms).
+        """
+        alias_path = self.vault_path / "tag_aliases.json"
+        with open(alias_path, 'w', encoding='utf-8') as f:
+            json.dump(aliases, f, indent=2)
+        print(f"Suggested aliases saved to {alias_path}")
+
+    def _load_tag_aliases(self):
+        """
+        Loads the tag alias map from `tag_aliases.json`.
+        Returns an empty dictionary if the file does not exist.
+
+        Returns:
+            dict: The loaded tag alias map.
+        """
+        alias_path = self.vault_path / "tag_aliases.json"
+        if alias_path.exists():
+            with open(alias_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {}
+
+    def _apply_aliases(self, tags):
+        """
+        Applies defined tag aliases to a given list of tags.
+
+        For each tag in the input list, if it exists as a key in the `self.tag_aliases`
+        dictionary, it is replaced by its corresponding canonical value. This ensures
+        consistency by converting aliased tags to their preferred forms.
+
+        Args:
+            tags (list): A list of tags (strings) to which aliases should be applied.
+
+        Returns:
+            list: A new list containing the tags after alias application.
+                  Tags not found as aliases remain unchanged.
+        """
+        aliased_tags = []
+        for tag in tags:
+            aliased_tags.append(self.tag_aliases.get(tag, tag))
+        return aliased_tags
+
+    def _clean_tag_format(self, tag_name):
+        """
+        Cleans a single tag name to ensure it adheres to Obsidian's recommended format.
+
+        The cleaning process involves:
+        1. Stripping leading/trailing whitespace.
+        2. Converting the tag to lowercase.
+        3. Replacing any sequences of spaces with single hyphens.
+        4. Removing all periods.
+
+        This helps maintain consistency and avoids issues with tag recognition in Obsidian.
+
+        Args:
+            tag_name (str): The original tag name string.
+
+        Returns:
+            str: The cleaned and formatted tag name.
+        """
+        cleaned_tag = tag_name.strip().lower()
+        cleaned_tag = re.sub(r'\s+', '-', cleaned_tag) # Replace spaces with hyphens
+        cleaned_tag = re.sub(r'\.+', '', cleaned_tag) # Remove periods
+        return cleaned_tag
+
+    def _load_tags_database(self):
+        """
+        Loads the existing tags database from `tags_database.json`.
+
+        This method reads the JSON file containing a comprehensive list of all
+        unique tags found in the Obsidian vault during the last scan.
+
+        Returns:
+            list: A list of tags (strings) from the database. Returns an empty list
+                  if the file does not exist or is empty.
+        """
+        if self.tags_database_path.exists():
+            with open(self.tags_database_path, 'r', encoding='utf-8') as f:
+                return json.load(f).get("tags", [])
+        return []
+
+    def _update_tag_database(self):
+        """
+        Updates the internal tag database by re-scanning the Obsidian vault.
+
+        This method invokes the `ObsidianTagExtractor` to perform a fresh scan
+        of all Markdown files, extract all unique tags, and then saves this
+        updated list to `tags_database.json`. This ensures that the automator
+        always works with the most current set of tags present in the vault.
+        """
+        print("Updating tag database...")
+        self.tag_extractor.scan_vault()
+        self.tag_extractor.save_tags_to_json(self.tags_database_path)
+        print("Tag database updated.")
+
+    def _extract_front_matter_and_content(self, file_path):
+        """
+        Extracts the YAML front matter block and the main content from a Markdown file.
+
+        This method reads the entire file content and attempts to parse out the
+        YAML front matter, which is typically enclosed by `---` delimiters at the
+        beginning of the file.
+
+        Args:
+            file_path (Path): The path to the Markdown file.
+
+        Returns:
+            tuple: A tuple containing:
+                   - str: The raw YAML front matter content (excluding the `---` delimiters),
+                          or None if no front matter is found.
+                   - str: The main content of the file, following the front matter (or the
+                          entire content if no front matter is present).
+        """
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        front_matter_match = re.match(r'---\s*\n(.*?)\n---\s*(\n|$)(.*)', content, re.DOTALL)
+        if front_matter_match:
+            front_matter_raw = front_matter_match.group(1)
+            # Group 3 contains the content after the closing front matter delimiter
+            main_content = front_matter_match.group(3)
+            return front_matter_raw, main_content
+        return None, content # No front matter found
+
+    def _parse_front_matter(self, front_matter_raw):
+        """
+        Parses a raw YAML front matter string into a dictionary using PyYAML.
+
+        Args:
+            front_matter_raw (str): The raw string content of the YAML front matter
+                                    (without the `---` delimiters).
+
+        Returns:
+            dict: A dictionary representing the parsed front matter.
+                  Returns an empty dictionary if `front_matter_raw` is empty or None,
+                  or if parsing fails.
+        """
+        if not front_matter_raw:
+            return {}
+        try:
+            parsed_data = yaml.safe_load(front_matter_raw)
+            # If parsing yields None or a non-dict, return an empty dict
+            if not isinstance(parsed_data, dict):
+                return {}
+            # Ensure 'tags' is always a list, even if parsed as a single string
+            if 'tags' in parsed_data and not isinstance(parsed_data['tags'], list):
+                parsed_data['tags'] = [str(parsed_data['tags'])]
+            return parsed_data
+        except yaml.YAMLError as e:
+            print(f"Error parsing front matter with PyYAML: {e}")
+            return {}
+
+    def _serialize_front_matter(self, data):
+        """
+        Serializes a dictionary of front matter data back into a YAML front matter string
+        using PyYAML.
+
+        Args:
+            data (dict): A dictionary containing the front matter keys and values.
+
+        Returns:
+            str: The formatted YAML front matter block, including the `---` delimiters.
+        """
+        # Ensure 'tags' is a list for proper YAML serialization
+        if 'tags' in data and not isinstance(data['tags'], list):
+            data['tags'] = [str(data['tags'])]
+        
+        # Ensure 'ai_processed' is a boolean for proper YAML serialization
+        if 'ai_processed' in data:
+            data['ai_processed'] = bool(data['ai_processed'])
+
+        # Use default_flow_style=False for multi-line lists, and sort_keys=False to preserve order
+        # However, PyYAML's default_flow_style=False will make lists multi-line.
+        # To keep tags inline, we might need to handle it separately or accept PyYAML's default.
+        # For now, let's use default_flow_style=None which lets PyYAML decide, often inline for simple lists.
+        # We'll also use explicit_start=False and explicit_end=False to avoid extra '---' in the output.
+        yaml_string = yaml.safe_dump(data, sort_keys=False, default_flow_style=None)
+        return "---\n" + yaml_string + "---\n"
+
+    def _get_ai_suggested_tags(self, file_content, existing_tags):
+        """
+        Analyzes the provided file content using the configured Gemini AI model
+        to suggest relevant tags.
+
+        This method constructs a prompt using the file content and a list of
+        all existing tags in the vault, then sends it to the Gemini API.
+        It includes a robust retry mechanism with exponential backoff and jitter
+        to handle potential API rate limits or transient errors (e.g., BlockedPromptException,
+        StopCandidateException, or HTTP 429 errors).
+
+        Suggested tags are post-processed to ensure they adhere to Obsidian's
+        tag format (lowercase, hyphens for spaces, no periods) and are not
+        already present in the `existing_tags` list provided as an argument.
+        If AI tagging fails after max retries, it falls back to a basic tag suggestion.
+
+        Args:
+            file_content (str): The main textual content of the Markdown file.
+            existing_tags (list): A list of tags already present in the file's front matter.
+
+        Returns:
+            list: A list of cleaned, AI-suggested tags (strings) that are not
+                  already in `existing_tags`. Returns an empty list if no
+                  suggestions are generated or if the AI is not configured.
+        """
+        if not self.gemini_model:
+            print("Gemini API not configured. Using basic tag suggestion.")
+            return self.tag_extractor.suggest_tags_for_content(file_content, existing_tags)
+
+        all_existing_tags = self._get_all_tags_from_vault()
+
+        # Prepare CSV strings for prompt placeholders
+        all_existing_tags_csv = ", ".join(all_existing_tags)
+        existing_tags_csv = ", ".join(existing_tags)
+
+        # Use the configurable AI prompt with explicit placeholders
+        prompt = self.ai_prompt.format(
+            file_content=file_content,
+            all_existing_tags_csv=all_existing_tags_csv,
+            existing_tags_csv=existing_tags_csv
+        )
+        max_retries = 10
+        initial_delay = 1 # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                response = self.gemini_model.generate_content(prompt)
+                suggested_tags_str = response.text.strip()
+                
+                # Post-process suggested tags to remove spaces and periods, and convert to lowercase
+                processed_suggested_tags = []
+                for tag in suggested_tags_str.split(','):
+                    cleaned_tag = tag.strip().lower()
+                    cleaned_tag = re.sub(r'\s+', '-', cleaned_tag) # Replace spaces with hyphens
+                    cleaned_tag = re.sub(r'\.+', '', cleaned_tag) # Remove periods
+                    if cleaned_tag and cleaned_tag not in existing_tags and cleaned_tag not in self.excluded_tags:
+                        processed_suggested_tags.append(cleaned_tag)
+                
+                print(f"AI suggested tags: {processed_suggested_tags}")
+                return processed_suggested_tags
+            except (BlockedPromptException, StopCandidateException) as e:
+                # These exceptions can sometimes indicate rate limits or content filtering
+                print(f"AI content generation blocked or stopped: {e}")
+                if attempt < max_retries - 1:
+                    delay = initial_delay * (2 ** attempt) + random.uniform(0, 1) # Exponential backoff with jitter
+                    print(f"Retrying in {delay:.2f} seconds (attempt {attempt + 1}/{max_retries})...")
+                    time.sleep(delay)
+                else:
+                    print(f"Max retries ({max_retries}) reached. Falling back to basic tag suggestion.")
+                    return self.tag_extractor.suggest_tags_for_content(file_content, existing_tags)
+            except Exception as e:
+                # Catch other potential API errors, including 429 if not specifically caught by BlockedPromptException
+                print(f"Error getting AI suggested tags: {e}")
+                if "429" in str(e) and hasattr(e, 'response') and hasattr(e.response, 'json'):
+                    try:
+                        error_details = e.response.json()
+                        retry_delay_seconds = error_details.get('retry_delay', {}).get('seconds')
+                        if retry_delay_seconds:
+                            delay = int(retry_delay_seconds) + random.uniform(0, 0.5) # Add jitter to API's suggested delay
+                            print(f"API suggested retry after {delay:.2f} seconds (attempt {attempt + 1}/{max_retries})...")
+                            time.sleep(delay)
+                            continue # Retry immediately with the suggested delay
+                    except (json.JSONDecodeError, AttributeError, TypeError):
+                        pass # Fall through to generic exponential backoff if retry_delay not found or parsing fails
+                
+                if attempt < max_retries - 1:
+                    delay = initial_delay * (2 ** attempt) + random.uniform(0, 1) # Exponential backoff with jitter
+                    print(f"Retrying in {delay:.2f} seconds (attempt {attempt + 1}/{max_retries})...")
+                    time.sleep(delay)
+                else:
+                    print(f"Max retries ({max_retries}) reached. Falling back to basic tag suggestion.")
+                    return self.tag_extractor.suggest_tags_for_content(file_content, existing_tags)
+        
+        # Should not be reached if max_retries is handled correctly, but as a safeguard
+        return self.tag_extractor.suggest_tags_for_content(file_content, existing_tags)
+
+    def _get_all_tags_from_vault(self):
+        """
+        Scans the entire Obsidian vault to extract all unique, cleaned tags
+        from the YAML front matter of Markdown files.
+
+        This method performs a recursive walk through the vault directory,
+        parses the front matter of each Markdown file (excluding the '.obsidian' directory),
+        and collects all tags. Each tag is cleaned using `_clean_tag_format`
+        to ensure consistency (lowercase, hyphens for spaces, no periods).
+
+        This comprehensive list of existing tags is crucial for providing accurate
+        AI tag suggestions and for generating relevant tag aliases.
+
+        Returns:
+            list: A sorted list of all unique, cleaned tags found across the vault.
+        """
+        all_vault_tags = set()
+        for root, _, files in os.walk(self.vault_path):
+            for file in files:
+                file_path = Path(root) / file
+                if file_path.suffix.lower() == '.md' and '.obsidian' not in file_path.parts:
+                    front_matter_raw, _ = self._extract_front_matter_and_content(file_path)
+                    if front_matter_raw:
+                        parsed_front_matter = self._parse_front_matter(front_matter_raw)
+                        file_tags = parsed_front_matter.get('tags', [])
+                        for tag in file_tags:
+                            all_vault_tags.add(self._clean_tag_format(tag))
+        return sorted(list(all_vault_tags))
+
+    def _should_skip_file(self, file_path, parsed_front_matter, re_tag_option):
+        """
+        Determines whether a given Markdown file should be skipped during the
+        tagging process based on configured exclusion lists and the user's
+        selected re-tagging option.
+
+        Args:
+            file_path (Path): The full path to the Markdown file being considered.
+            parsed_front_matter (dict): The parsed YAML front matter of the file.
+                                        Expected to contain 'tags' (list) and 'ai_processed' (bool) keys.
+            re_tag_option (str): A string indicating the user's re-tagging preference:
+                                 - '1': Skip if 'ai_processed' is True.
+                                 - '3': Skip if 'ai_processed' is True OR if no existing tags.
+                                 - '4': Skip if any existing tags are present.
+
+        Returns:
+            bool: True if the file should be skipped, False otherwise.
+        """
+        # Check if file path is excluded
+        relative_file_path = str(file_path.relative_to(self.vault_path)).replace('\\', '/')
+        relative_file_path_parts = relative_file_path.split('/')
+
+        for excluded_path_str in self.excluded_paths:
+            excluded_path_parts = excluded_path_str.split('/')
+
+            # Check if the excluded path is a prefix of the file path's components
+            # This handles both file and directory exclusions correctly
+            # e.g., ['test'] is a prefix of ['test', 'subfolder', 'file.md']
+            # but ['test'] is NOT a prefix of ['testing', 'file.md']
+            if len(relative_file_path_parts) >= len(excluded_path_parts) and \
+               relative_file_path_parts[:len(excluded_path_parts)] == excluded_path_parts:
+                print(f"Skipping '{file_path}' as it is in the exclusion list.")
+                return True
+
+        # Check re-tagging options
+        if re_tag_option == '1': # Only process files that have NOT been AI-tagged before
+            if parsed_front_matter.get('ai_processed'):
+                print(f"Skipping '{file_path}' as it is already AI-processed and re-tagging option 1 is selected.")
+                return True
+        elif re_tag_option == '3': # Only re-tag files that have existing tags but are NOT AI-tagged
+            if parsed_front_matter.get('ai_processed') or not parsed_front_matter.get('tags'):
+                print(f"Skipping '{file_path}' as it does not match re-tagging option 3 criteria (either AI-processed or no existing tags).")
+                return True
+        elif re_tag_option == '4': # Do NOT re-tag any files that already have tags
+            if parsed_front_matter.get('tags'):
+                print(f"Skipping '{file_path}' as it has existing tags and re-tagging option 4 is selected.")
+                return True
+        return False
+
+    def process_file(self, file_path):
+        """
+        Processes a single Obsidian Markdown file to suggest and update its tags.
+
+        This method performs the following steps:
+        1. Extracts existing front matter and main content.
+        2. Retrieves AI-suggested tags based on the file's content and existing vault tags.
+        3. Applies any defined tag aliases to the AI-suggested tags.
+        4. Combines existing tags with new AI-suggested (and aliased) tags,
+           ensuring uniqueness and capping the total at 15 tags.
+        5. Cleans the format of all final tags (lowercase, hyphens for spaces, no periods).
+        6. Updates the file's front matter with the new tag list and marks it as 'ai_processed'.
+        7. Writes the modified content back to the file.
+
+        Args:
+            file_path (Path): The path to the Markdown file to be processed.
+        """
+        print(f"Processing file: {file_path}")
+        
+        front_matter_raw, main_content = self._extract_front_matter_and_content(file_path)
+        parsed_front_matter = self._parse_front_matter(front_matter_raw) if front_matter_raw else {}
+        
+        existing_tags = set(parsed_front_matter.get('tags', []))
+        
+        # Get AI suggested tags
+        ai_suggested_tags = self._get_ai_suggested_tags(main_content, list(existing_tags))
+        
+        # Apply aliases to AI suggested tags
+        aliased_ai_suggested_tags = self._apply_aliases(ai_suggested_tags)
+
+        # Combine existing and suggested tags, remove duplicates
+        # Prioritize existing tags, then add AI-suggested tags up to the limit of 15
+        combined_tags = list(existing_tags)
+        for tag in aliased_ai_suggested_tags:
+            if tag not in combined_tags and tag not in self.excluded_tags:
+                combined_tags.append(tag)
+            if len(combined_tags) >= 15: # Cap the total number of tags at 15
+                break
+        
+        updated_tags = sorted(list(set(combined_tags))) # Ensure uniqueness and sort
+        
+        # If after combining and sorting, the list is still over 15, truncate it
+        if len(updated_tags) > 15:
+            updated_tags = updated_tags[:15]
+
+        # Apply final cleaning to all tags before writing
+        final_tags = [self._clean_tag_format(tag) for tag in updated_tags]
+        final_tags = sorted(list(set(final_tags))) # Ensure uniqueness and sort again after cleaning
+
+        parsed_front_matter['tags'] = final_tags
+        parsed_front_matter['ai_processed'] = True # Mark the file as AI-processed
+        
+        new_front_matter_block = self._serialize_front_matter(parsed_front_matter)
+        
+        # Reconstruct the file content
+        new_file_content = new_front_matter_block + main_content
+        
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(new_file_content)
+        
+        print(f"Tags updated for {file_path}: {final_tags}")
+
+    def _interactive_tag_review(self, file_path, current_tags, suggested_tags):
+        """
+        Presents current and AI-suggested tags to the user for interactive review.
+
+        The user can choose to:
+        - 'a' (accept all): Combine all current and suggested tags.
+        - 'r' (reject all AI suggestions): Keep only the current tags.
+        - 'm' (manually edit): Enter a comma-separated list of desired tags.
+        - 's' (skip file): Skip processing this file without making changes.
+
+        All tags returned are cleaned and unique.
+
+        Args:
+            file_path (Path): The path to the file being reviewed.
+            current_tags (list): A list of tags currently in the file's front matter.
+            suggested_tags (list): A list of tags suggested by the AI.
+
+        Returns:
+            list: The final list of tags after user interaction, or None if the user
+                  chooses to skip the file.
+        """
+        print(f"\n--- Reviewing Tags for: {file_path.name} ---")
+        print(f"Current Tags: {', '.join(current_tags)}")
+        print(f"Suggested AI Tags: {', '.join(suggested_tags)}")
+
+        combined_tags = sorted(list(set(current_tags + suggested_tags)))
+        print(f"Combined Tags (before review): {', '.join(combined_tags)}")
+
+        while True:
+            action = input(
+                "Actions: (a)ccept all, (r)eject all AI suggestions, (m)anually edit, (s)kip file: "
+            ).strip().lower()
+
+            if action == 'a':
+                return combined_tags
+            elif action == 'r':
+                return current_tags # Revert to only current tags
+            elif action == 'm':
+                while True:
+                    edit_input = input(
+                        f"Enter desired tags (comma-separated, e.g., tag1, tag2, new-tag) or 'cancel' to re-choose action: "
+                    ).strip()
+                    if edit_input.lower() == 'cancel':
+                        break
+                    
+                    edited_tags = [self._clean_tag_format(t) for t in edit_input.split(',') if t.strip()]
+                    print(f"You entered: {', '.join(edited_tags)}")
+                    confirm_edit = input("Confirm these tags? (yes/no): ").strip().lower()
+                    if confirm_edit == 'yes':
+                        return sorted(list(set(edited_tags)))
+            elif action == 's':
+                return None # Signal to skip processing this file
+            else:
+                print("Invalid action. Please choose 'a', 'r', 'm', or 's'.")
+
+    def _interactive_alias_review(self, suggested_aliases):
+        """
+        Presents a list of automatically suggested tag aliases to the user for review.
+
+        For each suggested alias (e.g., 'next-js' -> 'nextjs'), the user is prompted
+        to approve ('yes'), reject ('no'), or skip ('skip') the remaining suggestions.
+        Approved aliases are collected into a dictionary.
+
+        Args:
+            suggested_aliases (dict): A dictionary where keys are potential alias tags
+                                      and values are their suggested canonical forms.
+
+        Returns:
+            dict: A dictionary containing only the aliases that were approved by the user.
+        """
+        print("\n--- Reviewing Suggested Tag Aliases ---")
+        approved_aliases = {}
+        if not suggested_aliases:
+            print("No aliases to review.")
+            return {}
+
+        for alias, canonical in suggested_aliases.items():
+            while True:
+                choice = input(f"Approve '{alias}' -> '{canonical}'? (yes/no/skip): ").strip().lower()
+                if choice == 'yes':
+                    approved_aliases[alias] = canonical
+                    break
+                elif choice == 'no':
+                    print(f"Alias '{alias}' -> '{canonical}' rejected.")
+                    break
+                elif choice == 'skip':
+                    print("Skipping remaining aliases.")
+                    return approved_aliases # Return what's approved so far
+                else:
+                    print("Invalid choice. Please enter 'yes', 'no', or 'skip'.")
+        return approved_aliases
+
+    def add_excluded_tag(self, tag):
+        """
+        Adds a tag to the automator's exclusion list.
+
+        Excluded tags will not be suggested by the AI or added to files.
+        The tag is cleaned (lowercase, hyphens for spaces, no periods) before being added.
+        The updated exclusion list is saved to the configuration file.
+
+        Args:
+            tag (str): The tag name to add to the exclusion list.
+        """
+        cleaned_tag = self._clean_tag_format(tag)
+        if cleaned_tag not in self.excluded_tags:
+            self.excluded_tags.add(cleaned_tag)
+            self._save_config()
+            print(f"Tag '{cleaned_tag}' added to exclusion list.")
+        else:
+            print(f"Tag '{cleaned_tag}' is already in the exclusion list.")
+
+    def remove_excluded_tag(self, tag):
+        """
+        Removes a tag from the automator's exclusion list.
+
+        The tag is cleaned (lowercase, hyphens for spaces, no periods) before attempting
+        to remove it. The updated exclusion list is saved to the configuration file.
+
+        Args:
+            tag (str): The tag name to remove from the exclusion list.
+        """
+        cleaned_tag = self._clean_tag_format(tag)
+        if cleaned_tag in self.excluded_tags:
+            self.excluded_tags.remove(cleaned_tag)
+            self._save_config()
+            print(f"Tag '{cleaned_tag}' removed from exclusion list.")
+        else:
+            print(f"Tag '{cleaned_tag}' not found in the exclusion list.")
+
+    def add_excluded_path(self, path_str):
+        """
+        Adds a file or directory path to the automator's exclusion list.
+
+        Files or directories in this list will be skipped during the tagging process.
+        The path is normalized to be relative to the vault path and uses forward slashes
+        before being added. The updated exclusion list is saved to the configuration file.
+
+        Args:
+            path_str (str): The file or directory path to add. Can be absolute or relative
+                            to the vault.
+        """
+        path_obj = Path(path_str)
+        if not path_obj.is_absolute():
+            path_obj = self.vault_path / path_obj
+        
+        normalized_path = str(path_obj.relative_to(self.vault_path)).replace('\\', '/') # Store as relative, forward slashes
+        
+        if normalized_path not in self.excluded_paths:
+            self.excluded_paths.add(normalized_path)
+            self._save_config()
+            print(f"Path '{normalized_path}' added to exclusion list.")
+        else:
+            print(f"Path '{normalized_path}' is already in the exclusion list.")
+
+    def remove_excluded_path(self, path_str):
+        """
+        Removes a file or directory path from the automator's exclusion list.
+
+        The path is normalized to be relative to the vault path and uses forward slashes
+        before attempting to remove it. The updated exclusion list is saved to the
+        configuration file.
+
+        Args:
+            path_str (str): The file or directory path to remove. Can be absolute or relative
+                            to the vault.
+        """
+        path_obj = Path(path_str)
+        if not path_obj.is_absolute():
+            path_obj = self.vault_path / path_obj
+        
+        normalized_path = str(path_obj.relative_to(self.vault_path)).replace('\\', '/')
+        
+        if normalized_path in self.excluded_paths:
+            self.excluded_paths.remove(normalized_path)
+            self._save_config()
+            print(f"Path '{normalized_path}' removed from exclusion list.")
+        else:
+            print(f"Path '{normalized_path}' not found in the exclusion list.")
+
+    def view_exclusions(self):
+        """
+        Prints the current lists of excluded tags and excluded file/directory paths.
+
+        This provides an overview of what content the automator is configured to ignore
+        during its operations.
+        """
+        print("\n--- Current Exclusions ---")
+        print("Excluded Tags:")
+        if self.excluded_tags:
+            for tag in sorted(list(self.excluded_tags)):
+                print(f"  - {tag}")
+        else:
+            print("  No tags excluded.")
+        
+        print("\nExcluded Paths:")
+        if self.excluded_paths:
+            for path in sorted(list(self.excluded_paths)):
+                print(f"  - {path}")
+        else:
+            print("  No paths excluded.")
+        print("--------------------------")
+
+    def clear_tags(self, files_to_clear):
+        """
+        Clears all tags and the 'ai_processed' flag from the front matter of specified Markdown files.
+
+        This method iterates through a list of file paths, extracts their front matter,
+        removes the 'tags' and 'ai_processed' keys if present, and then rewrites the
+        file content.
+
+        Args:
+            files_to_clear (list): A list of `Path` objects representing the Markdown
+                                   files from which tags should be cleared.
+        """
+        print("\nStarting tag clearing process...")
+        for file_path in files_to_clear:
+            if not file_path.exists():
+                print(f"Warning: File not found - {file_path}. Skipping.")
+                continue
+            if not file_path.suffix.lower() == '.md':
+                print(f"Warning: Skipping non-markdown file - {file_path}.")
+                continue
+            
+            print(f"Clearing tags from: {file_path}")
+            front_matter_raw, main_content = self._extract_front_matter_and_content(file_path)
+            parsed_front_matter = self._parse_front_matter(front_matter_raw) if front_matter_raw else {}
+            
+            if 'tags' in parsed_front_matter:
+                del parsed_front_matter['tags'] # Remove the tags key
+            
+            # Optionally, remove ai_processed flag if desired when clearing tags
+            if 'ai_processed' in parsed_front_matter:
+                del parsed_front_matter['ai_processed']
+
+            new_front_matter_block = self._serialize_front_matter(parsed_front_matter)
+            
+            new_file_content = new_front_matter_block + main_content
+            
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(new_file_content)
+            
+            print(f"Tags cleared for {file_path}.")
+        print("\nTag clearing process complete.")
+
+    def rename_tag(self, old_tag, new_tag):
+        """
+        Renames an `old_tag` to a `new_tag` across the entire Obsidian vault.
+
+        This operation involves:
+        1. Iterating through all Markdown files, finding instances of `old_tag`
+           in their front matter, and replacing them with `new_tag`.
+        2. Updating the `tag_aliases.json` file: if `old_tag` was an alias,
+           its entry is updated to the `new_tag`; if `old_tag` was a canonical
+           form, all aliases pointing to it are updated to point to `new_tag`.
+        3. Re-scanning the vault and updating `tags_database.json` to reflect
+           the new tag structure.
+
+        Args:
+            old_tag (str): The tag name to be renamed (case-insensitive, cleaned internally).
+            new_tag (str): The new, desired tag name (case-insensitive, cleaned internally).
+        """
+        old_tag_clean = self._clean_tag_format(old_tag)
+        new_tag_clean = self._clean_tag_format(new_tag)
+        print(f"\nRenaming tag '{old_tag_clean}' to '{new_tag_clean}'...")
+        
+        # 1. Update tags in Markdown files
+        files_modified_count = 0
+        for root, _, files in os.walk(self.vault_path):
+            for file in files:
+                file_path = Path(root) / file
+                if file_path.suffix.lower() == '.md' and '.obsidian' not in file_path.parts:
+                    front_matter_raw, main_content = self._extract_front_matter_and_content(file_path)
+                    parsed_front_matter = self._parse_front_matter(front_matter_raw) if front_matter_raw else {}
+                    
+                    if 'tags' in parsed_front_matter:
+                        original_tags = set(parsed_front_matter['tags'])
+                        updated_tags = set()
+                        tag_changed_in_file = False # Initialize to False
+                        for tag in original_tags:
+                            if self._clean_tag_format(tag) == old_tag_clean: # Case-insensitive/normalized comparison
+                                updated_tags.add(new_tag_clean)
+                                tag_changed_in_file = True
+                            else:
+                                updated_tags.add(tag)
+                        
+                        if tag_changed_in_file:
+                            parsed_front_matter['tags'] = sorted(list(updated_tags))
+                            new_front_matter_block = self._serialize_front_matter(parsed_front_matter)
+                            new_file_content = new_front_matter_block + main_content
+                            with open(file_path, 'w', encoding='utf-8') as f:
+                                f.write(new_file_content)
+                            files_modified_count += 1
+                            print(f"  Updated '{file_path}'")
+        
+        print(f"Renamed '{old_tag}' to '{new_tag}' in {files_modified_count} Markdown files.")
+
+        # 2. Update tag_aliases.json
+        self.tag_aliases = self._load_tag_aliases() # Reload to get latest
+        aliases_modified_count = 0
+        new_aliases = {}
+        for alias, canonical in self.tag_aliases.items():
+            if alias.lower() == old_tag_clean:
+                new_aliases[new_tag_clean] = canonical # If old_tag was an alias, rename the alias itself
+                aliases_modified_count += 1
+            elif canonical.lower() == old_tag_clean:
+                new_aliases[alias] = new_tag_clean # If old_tag was a canonical form, update its aliases
+                aliases_modified_count += 1
+            else:
+                new_aliases[alias] = canonical
+        self._save_tag_aliases(new_aliases)
+        print(f"Updated {aliases_modified_count} entries in tag_aliases.json.")
+
+        # 3. Update tags_database.json
+        self._update_tag_database() # Re-scan vault to reflect changes in tags_database.json
+        print("Tag database (tags_database.json) updated to reflect tag rename.")
+        print(f"Tag '{old_tag}' successfully renamed to '{new_tag}' everywhere.")
+
+    def merge_tags(self, source_tag, target_tag):
+        """
+        Merges a `source_tag` into a `target_tag` across the entire Obsidian vault.
+
+        This operation effectively replaces all occurrences of `source_tag` with
+        `target_tag` and updates relevant tag databases. It involves:
+        1. Iterating through all Markdown files, finding instances of `source_tag`
+           in their front matter, and replacing them with `target_tag`.
+        2. Updating the `tag_aliases.json` file: if `source_tag` was an alias,
+           its entry is removed; if `source_tag` was a canonical form, all aliases
+           pointing to it are updated to point to `target_tag`.
+        3. Re-scanning the vault and updating `tags_database.json` to reflect
+           the merged tag structure.
+
+        Args:
+            source_tag (str): The tag name to be merged (will be replaced).
+            target_tag (str): The tag name to merge into (the canonical tag).
+        """
+        source_tag_clean = self._clean_tag_format(source_tag)
+        target_tag_clean = self._clean_tag_format(target_tag)
+        print(f"\nMerging tag '{source_tag_clean}' into '{target_tag_clean}'...")
+
+        # 1. Update tags in Markdown files
+        files_modified_count = 0
+        for root, _, files in os.walk(self.vault_path):
+            for file in files:
+                file_path = Path(root) / file
+                if file_path.suffix.lower() == '.md' and '.obsidian' not in file_path.parts:
+                    front_matter_raw, main_content = self._extract_front_matter_and_content(file_path)
+                    parsed_front_matter = self._parse_front_matter(front_matter_raw) if front_matter_raw else {}
+                    
+                    if 'tags' in parsed_front_matter:
+                        original_tags = set(parsed_front_matter['tags'])
+                        updated_tags = set()
+                        tag_changed_in_file = False
+                        for tag in original_tags:
+                            if self._clean_tag_format(tag) == source_tag_clean:
+                                updated_tags.add(target_tag_clean)
+                                tag_changed_in_file = True
+                            else:
+                                updated_tags.add(tag)
+                        
+                        if tag_changed_in_file:
+                            parsed_front_matter['tags'] = sorted(list(updated_tags))
+                            new_front_matter_block = self._serialize_front_matter(parsed_front_matter)
+                            new_file_content = new_front_matter_block + main_content
+                            with open(file_path, 'w', encoding='utf-8') as f:
+                                f.write(new_file_content)
+                            files_modified_count += 1
+                            print(f"  Updated '{file_path}'")
+        
+        print(f"Merged '{source_tag}' into '{target_tag}' in {files_modified_count} Markdown files.")
+
+        # 2. Update tag_aliases.json
+        self.tag_aliases = self._load_tag_aliases() # Reload to get latest
+        aliases_modified_count = 0
+        new_aliases = {}
+        for alias, canonical in self.tag_aliases.items():
+            if alias.lower() == source_tag_clean:
+                # If source_tag was an alias, remove it or redirect to target_tag
+                # For merging, we want to remove the source_tag as an alias
+                aliases_modified_count += 1
+                continue 
+            elif canonical.lower() == source_tag_clean:
+                new_aliases[alias] = target_tag_clean # If source_tag was a canonical form, update its aliases to point to target_tag
+                aliases_modified_count += 1
+            else:
+                new_aliases[alias] = canonical
+        self._save_tag_aliases(new_aliases)
+        print(f"Updated {aliases_modified_count} entries in tag_aliases.json.")
+
+        # 3. Update tags_database.json
+        self._update_tag_database() # Re-scan vault to reflect changes in tags_database.json
+        print("Tag database (tags_database.json) updated to reflect tag merge.")
+        print(f"Tag '{source_tag}' successfully merged into '{target_tag}' everywhere.")
+
+    def validate_tags(self):
+        """
+        Validates tags across all Markdown files in the vault.
+
+        This method performs two main checks:
+        1. **Orphan Tags:** Identifies tags present in Markdown file front matter
+           that are not found in the `tags_database.json`. This can indicate
+           tags that were manually added but not properly integrated or are typos.
+        2. **Malformed Tags:** Detects tags that contain spaces or periods, which
+           are generally discouraged in Obsidian for better compatibility and linking.
+
+        Results are printed to the console, categorizing issues by file.
+        """
+        print("\n--- Starting Tag Validation ---")
+        self._update_tag_database() # Ensure the database is up-to-date
+        all_known_tags = set(self._load_tags_database())
+        
+        orphan_tags_found = {} # {file_path: [orphan_tag1, ...]}
+        malformed_tags_found = {} # {file_path: [malformed_tag1, ...]}
+
+        for root, _, files in os.walk(self.vault_path):
+            for file in files:
+                file_path = Path(root) / file
+                if file_path.suffix.lower() == '.md' and '.obsidian' not in file_path.parts:
+                    front_matter_raw, _ = self._extract_front_matter_and_content(file_path)
+                    parsed_front_matter = self._parse_front_matter(front_matter_raw) if front_matter_raw else {}
+                    
+                    file_tags = set(parsed_front_matter.get('tags', []))
+                    
+                    current_file_orphans = []
+                    current_file_malformed = []
+
+                    for tag in file_tags:
+                        # Check for malformed tags
+                        if ' ' in tag or '.' in tag:
+                            current_file_malformed.append(tag)
+                        
+                        # Check for orphan tags (case-insensitive comparison for orphans)
+                        # Convert both to lowercase for comparison, but report the original tag
+                        if tag.lower() not in [t.lower() for t in all_known_tags]:
+                            current_file_orphans.append(tag)
+                    
+                    if current_file_orphans:
+                        orphan_tags_found[str(file_path.relative_to(self.vault_path))] = current_file_orphans
+                    if current_file_malformed:
+                        malformed_tags_found[str(file_path.relative_to(self.vault_path))] = current_file_malformed
+        
+        print("\n--- Validation Results ---")
+        if not orphan_tags_found and not malformed_tags_found:
+            print("No orphan or malformed tags found. Your vault tags are clean!")
+        else:
+            if orphan_tags_found:
+                print("\nOrphan Tags Found (tags in files not in tags_database.json):")
+                for file_path_str, tags in orphan_tags_found.items():
+                    print(f"  File: {file_path_str}")
+                    for tag in tags:
+                        print(f"    - {tag}")
+            
+            if malformed_tags_found:
+                print("\nMalformed Tags Found (tags containing spaces or periods):")
+                for file_path_str, tags in malformed_tags_found.items():
+                    print(f"  File: {file_path_str}")
+                    for tag in tags:
+                        print(f"    - {tag}")
+        print("\n--- Tag Validation Complete ---")
+
+
+    def run_automator(self, files_to_tag, re_tag_option):
+        """
+        Executes the main tag automation process on a specified set of Markdown files.
+
+        This method orchestrates the tagging workflow, including:
+        1. Ensuring the tag database is up-to-date.
+        2. Iterating through each specified file.
+        3. Applying exclusion rules and re-tagging options to determine if a file should be processed.
+        4. For eligible files, it either automatically processes them using `process_file`
+           or initiates an interactive review via `_interactive_tag_review` based on `re_tag_option`.
+        5. Updates the in-memory tag set after each file is processed to ensure subsequent
+           AI calls have the most current tag list.
+        6. Offers an option to run a final full scan to update the tag database.
+
+        Args:
+            files_to_tag (list): A list of `Path` objects for the Markdown files to process.
+            re_tag_option (str): A string representing the user's choice for re-tagging behavior.
+                                 Possible values include:
+                                 - '1': Only process files that have NOT been AI-tagged before.
+                                 - '2': Re-tag ALL files.
+                                 - '3': Only re-tag files with existing tags but not AI-tagged.
+                                 - '4': Do NOT re-tag any files that already have tags.
+                                 - '5': Enable interactive tag review and approval for AI suggestions.
+        """
+        # Initial full scan to populate the in-memory tag set and the JSON database
+        self._update_tag_database()
+        
+        for file_path in files_to_tag:
+            if not file_path.exists():
+                print(f"Warning: File not found - {file_path}. Skipping.")
+                continue
+            if not file_path.suffix.lower() == '.md':
+                print(f"Warning: Skipping non-markdown file - {file_path}.")
+                continue
+            front_matter_raw, main_content = self._extract_front_matter_and_content(file_path)
+            parsed_front_matter = self._parse_front_matter(front_matter_raw) if front_matter_raw else {}
+
+            if self._should_skip_file(file_path, parsed_front_matter, re_tag_option):
+                continue
+
+            # Call process_file, but also handle interactive review if enabled
+            if re_tag_option == '5': # Assuming '5' will be the interactive review option
+                existing_tags = set(parsed_front_matter.get('tags', []))
+                ai_suggested_tags = self._get_ai_suggested_tags(main_content, list(existing_tags))
+                aliased_ai_suggested_tags = self._apply_aliases(ai_suggested_tags)
+
+                final_tags_after_review = self._interactive_tag_review(
+                    file_path, list(existing_tags), aliased_ai_suggested_tags
+                )
+
+                if final_tags_after_review is None: # User chose to skip
+                    print(f"Skipping '{file_path}' due to user choice.")
+                    continue
+                else:
+                    # Update front matter with reviewed tags
+                    parsed_front_matter['tags'] = sorted(list(set([self._clean_tag_format(tag) for tag in final_tags_after_review])))
+                    parsed_front_matter['ai_processed'] = True
+                    new_front_matter_block = self._serialize_front_matter(parsed_front_matter)
+                    new_file_content = new_front_matter_block + main_content
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.write(new_file_content)
+                    print(f"Tags updated for {file_path}: {parsed_front_matter['tags']}")
+            else:
+                self.process_file(file_path)
+            
+            # After processing a file, update the in-memory tag set with any newly added tags
+            # This ensures subsequent AI calls have the most up-to-date tag list
+            current_file_tags = self._parse_front_matter(self._extract_front_matter_and_content(file_path)[0]).get('tags', [])
+            self.tag_extractor.tags.update(current_file_tags)
+        
+        print("\nTagging process complete for all specified files.")
+        
+        final_scan_choice = input("Do you want to run a final full scan to update the tags database? (yes/no): ").strip().lower()
+        if final_scan_choice == 'yes':
+            self._update_tag_database()
+            print("Final tag database update complete.")
+        else:
+            print("Skipping final tag database update.")
+
+# Example usage (for testing purposes)
+if __name__ == "__main__":
+    VAULT_PATH = r"e:\Creator_Command_Hub_Obsidian"
+
+    # Instantiate without passing an API key explicitly. The constructor will
+    # read GEMINI_API_KEY from the environment if available.
+    automator = ObsidianTagAutomator(VAULT_PATH)
+
+    while True:
+        print("\nObsidian Tag Automator")
+        print("----------------------")
+        
+        print("\nMain Menu:")
+        print("  1. Run Tagging Automator (process Markdown files)")
+        print("  2. Generate and Review Suggested Tag Aliases")
+        print("  3. Clear Tags from Files")
+        print("  4. Rename/Refactor a Tag")
+        print("  5. Merge Tags")
+        print("  6. Configure AI Prompt")
+        print("  7. Manage Tag/File Exclusions")
+        print("  8. Interactive Tag Review and Approval")
+        print("  9. Interactive Alias Review and Approval")
+        print("  10. Validate Tags (Find Orphans and Malformed Tags)")
+        print("  11. Exit")
+
+        main_choice = input("Enter your choice (1-11): ").strip()
+
+        # Helper function to get files based on user choice
+        def _get_files_from_user_choice(vault_path, prompt_message):
+            print(f"\n{prompt_message}")
+            print("1. Process specific Markdown files (enter paths manually)")
+            print("2. Process ALL Markdown files in the vault")
+            print("3. Process all Markdown files within a specific directory")
+
+            choice = input("Enter your file selection choice (1, 2, or 3): ").strip()
+            files_selected = []
+
+            if choice == '1':
+                while True:
+                    file_input = input("Enter the path to a Markdown file (relative to vault, or full path), or 'done' to finish: ").strip()
+                    if file_input.lower() == 'done':
+                        break
+                    
+                    # Strip quotes if present, as they can interfere with Path resolution
+                    if file_input.startswith('"') and file_input.endswith('"'):
+                        file_input = file_input[1:-1]
+                    if file_input.startswith("'") and file_input.endswith("'"):
+                        file_input = file_input[1:-1]
+
+                    file_path = Path(file_input)
+                    if not file_path.is_absolute():
+                        file_path = Path(vault_path) / file_path
+                    
+                    if file_path.exists() and file_path.suffix.lower() == '.md':
+                        files_selected.append(file_path)
+                    else:
+                        print(f"Invalid file path or not a Markdown file: '{file_input}'. Please ensure the path is correct and the file exists. Do not use quotes when entering the path. Try again.")
+                
+                if not files_selected:
+                    print("No files selected. Returning to main menu.")
+            elif choice == '2':
+                print("Scanning vault for all Markdown files...")
+                for root, _, files in os.walk(vault_path):
+                    for file in files:
+                        file_path = Path(root) / file
+                        if file_path.suffix.lower() == '.md' and '.obsidian' not in file_path.parts:
+                            files_selected.append(file_path)
+                print(f"Found {len(files_selected)} Markdown files.")
+            elif choice == '3':
+                while True:
+                    dir_input = input("Enter the path to the directory (relative to vault, or full path): ").strip()
+                    # Strip quotes if present
+                    if dir_input.startswith('"') and dir_input.endswith('"'):
+                        dir_input = dir_input[1:-1]
+                    if dir_input.startswith("'") and dir_input.endswith("'"):
+                        dir_input = dir_input[1:-1]
+
+                    dir_path = Path(dir_input)
+                    if not dir_path.is_absolute():
+                        dir_path = Path(vault_path) / dir_path
+                    
+                    if dir_path.is_dir():
+                        print(f"Scanning directory '{dir_path}' for Markdown files...")
+                        for root, _, files in os.walk(dir_path):
+                            for file in files:
+                                file_path = Path(root) / file
+                                if file_path.suffix.lower() == '.md' and '.obsidian' not in file_path.parts:
+                                    files_selected.append(file_path)
+                        print(f"Found {len(files_selected)} Markdown files in '{dir_path}'.")
+                        break
+                    else:
+                        print(f"Invalid directory path: '{dir_input}'. Please ensure the path is correct and it is a directory. Do not use quotes when entering the path. Try again.")
+                
+                if not files_selected:
+                    print("No Markdown files found in the specified directory. Returning to main menu.")
+            else:
+                print("Invalid choice. Returning to main menu.")
+            return files_selected
+
+        if main_choice == '1':
+            print("\nRe-tagging options:")
+            print("  1. Only process files that have NOT been AI-tagged before (no 'ai_processed' flag).")
+            print("  2. Re-tag ALL files, including those previously AI-tagged.")
+            print("  3. Only re-tag files that have existing tags but are NOT AI-tagged (i.e., manually tagged files).")
+            print("  4. Do NOT re-tag any files that already have tags (skip all files with existing tags, regardless of 'ai_processed' flag).")
+            print("  5. Interactive Tag Review and Approval (for AI-suggested tags)")
+
+            re_tag_option = input("Enter your re-tagging choice (1, 2, 3, 4, or 5): ").strip()
+
+            files_to_process = _get_files_from_user_choice(VAULT_PATH, "Choose files to process:")
+            
+            if files_to_process:
+                automator.run_automator(files_to_process, re_tag_option)
+            
+            # After running automator, ask if user wants to continue or exit
+            continue_choice = input("\nTagging process finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
+            if continue_choice == 'exit':
+                print("Exiting Tag Automator.")
+                break # Exit the main loop
+            
+        elif main_choice == '2':
+            print("\nGenerating suggested tag aliases...")
+            automator._update_tag_database() # Ensure tag database is fresh
+            suggested_aliases = automator._generate_suggested_aliases()
+            
+            if suggested_aliases:
+                # Call interactive alias review
+                approved_aliases = automator._interactive_alias_review(suggested_aliases)
+                
+                if approved_aliases:
+                    # Merge approved aliases with existing ones
+                    current_aliases = automator._load_tag_aliases()
+                    current_aliases.update(approved_aliases)
+                    automator._save_tag_aliases(current_aliases)
+                    print("Approved tag aliases saved/updated in tag_aliases.json.")
+                else:
+                    print("No aliases approved or saved.")
+            else:
+                print("No new tag aliases suggested based on the current tag database.")
+            
+            # After generating aliases, ask if user wants to continue or exit
+            continue_choice = input("\nAlias generation finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
+            if continue_choice == 'exit':
+                print("Exiting Tag Automator.")
+                break # Exit the main loop
+        
+        elif main_choice == '3':
+            files_to_clear = _get_files_from_user_choice(VAULT_PATH, "Choose scope for clearing tags:")
+
+            if files_to_clear:
+                automator.clear_tags(files_to_clear)
+            
+            continue_choice = input("\nTag clearing process finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
+            if continue_choice == 'exit':
+                print("Exiting Tag Automator.")
+                break # Exit the main loop
+
+        elif main_choice == '4':
+            print("\nTag Renaming/Refactoring Tool")
+            old_tag = input("Enter the tag to rename (old tag): ").strip().lower()
+            new_tag = input("Enter the new tag name: ").strip().lower()
+            
+            if not old_tag or not new_tag:
+                print("Old tag and new tag cannot be empty. Returning to main menu.")
+            elif old_tag == new_tag:
+                print("Old tag and new tag are the same. No renaming needed. Returning to main menu.")
+            else:
+                automator.rename_tag(old_tag, new_tag)
+            
+            continue_choice = input("\nTag renaming process finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
+            if continue_choice == 'exit':
+                print("Exiting Tag Automator.")
+                break # Exit the main loop
+
+        elif main_choice == '5':
+            print("\nTag Merging Tool")
+            source_tag = input("Enter the tag to merge FROM (source tag): ").strip().lower()
+            target_tag = input("Enter the tag to merge INTO (target tag - this will be the canonical tag): ").strip().lower()
+
+            if not source_tag or not target_tag:
+                print("Source tag and target tag cannot be empty. Returning to main menu.")
+            elif source_tag == target_tag:
+                print("Source tag and target tag are the same. No merging needed. Returning to main menu.")
+            else:
+                automator.merge_tags(source_tag, target_tag)
+            
+            continue_choice = input("\nTag merging process finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
+            if continue_choice == 'exit':
+                print("Exiting Tag Automator.")
+                break # Exit the main loop
+
+        elif main_choice == '6':
+            print("\nConfigure AI Prompt")
+            print("Current AI Prompt (first 200 chars):")
+            print(automator.get_ai_prompt()[:200] + "...")
+            
+            new_prompt_choice = input("Do you want to set a new custom AI prompt? (yes/no): ").strip().lower()
+            if new_prompt_choice == 'yes':
+                print("Enter your new custom AI prompt. Type 'END_PROMPT' on a new line to finish.")
+                new_prompt_lines = []
+                while True:
+                    line = input()
+                    if line == 'END_PROMPT':
+                        break
+                    new_prompt_lines.append(line)
+                new_prompt = "\n".join(new_prompt_lines)
+                automator.set_ai_prompt(new_prompt)
+                print("AI prompt updated.")
+            else:
+                print("AI prompt not changed.")
+            
+            continue_choice = input("\nAI prompt configuration finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
+            if continue_choice == 'exit':
+                print("Exiting Tag Automator.")
+                break # Exit the main loop
+
+        elif main_choice == '7':
+            print("\nManage Tag/File Exclusions")
+            print("1. Add Tag to Exclusion List")
+            print("2. Remove Tag from Exclusion List")
+            print("3. Add File/Directory to Exclusion List")
+            print("4. Remove File/Directory from Exclusion List")
+            print("5. View Current Exclusions")
+            
+            exclusion_choice = input("Enter your choice (1-5): ").strip()
+
+            if exclusion_choice == '1':
+                tag_to_add = input("Enter tag to add to exclusion list: ").strip().lower()
+                automator.add_excluded_tag(tag_to_add)
+            elif exclusion_choice == '2':
+                tag_to_remove = input("Enter tag to remove from exclusion list: ").strip().lower()
+                automator.remove_excluded_tag(tag_to_remove)
+            elif exclusion_choice == '3':
+                path_to_add = input("Enter file or directory path to add to exclusion list (relative to vault, or full path): ").strip()
+                automator.add_excluded_path(path_to_add)
+            elif exclusion_choice == '4':
+                path_to_remove = input("Enter file or directory path to remove from exclusion list (relative to vault, or full path): ").strip()
+                automator.remove_excluded_path(path_to_remove)
+            elif exclusion_choice == '5':
+                automator.view_exclusions()
+            else:
+                print("Invalid choice. Returning to main menu.")
+            
+            continue_choice = input("\nExclusion management finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
+            if continue_choice == 'exit':
+                print("Exiting Tag Automator.")
+                break # Exit the main loop
+
+        elif main_choice == '8': # New option for interactive tag review
+            files_to_review = _get_files_from_user_choice(VAULT_PATH, "Interactive Tag Review and Approval")
+
+            if files_to_review:
+                for file_path in files_to_review:
+                    if not file_path.exists() or not file_path.suffix.lower() == '.md':
+                        print(f"Skipping invalid file: {file_path}")
+                        continue
+                    
+                    front_matter_raw, main_content = automator._extract_front_matter_and_content(file_path)
+                    parsed_front_matter = automator._parse_front_matter(front_matter_raw) if front_matter_raw else {}
+                    existing_tags = set(parsed_front_matter.get('tags', []))
+                    ai_suggested_tags = automator._get_ai_suggested_tags(main_content, list(existing_tags))
+                    aliased_ai_suggested_tags = automator._apply_aliases(ai_suggested_tags)
+
+                    final_tags_after_review = automator._interactive_tag_review(
+                        file_path, list(existing_tags), aliased_ai_suggested_tags
+                    )
+
+                    if final_tags_after_review is None: # User chose to skip
+                        print(f"Skipping '{file_path}' due to user choice.")
+                        continue
+                    else:
+                        parsed_front_matter['tags'] = sorted(list(set([automator._clean_tag_format(tag) for tag in final_tags_after_review])))
+                        parsed_front_matter['ai_processed'] = True
+                        new_front_matter_block = automator._serialize_front_matter(parsed_front_matter)
+                        new_file_content = new_front_matter_block + main_content
+                        with open(file_path, 'w', encoding='utf-8') as f:
+                            f.write(new_file_content)
+                        print(f"Tags updated for {file_path}: {parsed_front_matter['tags']}")
+            
+            continue_choice = input("\nInteractive tag review finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
+            if continue_choice == 'exit':
+                print("Exiting Tag Automator.")
+                break # Exit the main loop
+
+        elif main_choice == '9': # New option for interactive alias review
+            print("\nInteractive Alias Review and Approval")
+            automator._update_tag_database() # Ensure tag database is fresh
+            suggested_aliases = automator._generate_suggested_aliases()
+            
+            if suggested_aliases:
+                approved_aliases = automator._interactive_alias_review(suggested_aliases)
+                
+                if approved_aliases:
+                    current_aliases = automator._load_tag_aliases()
+                    current_aliases.update(approved_aliases)
+                    automator._save_tag_aliases(current_aliases)
+                    print("Approved tag aliases saved/updated in tag_aliases.json.")
+                else:
+                    print("No aliases approved or saved.")
+            else:
+                print("No new tag aliases suggested based on the current tag database.")
+            
+            continue_choice = input("\nInteractive alias review finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
+            if continue_choice == 'exit':
+                print("Exiting Tag Automator.")
+                break # Exit the main loop
+
+        elif main_choice == '10': # New option for tag validation
+            automator.validate_tags()
+            continue_choice = input("\nTag validation finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
+            if continue_choice == 'exit':
+                print("Exiting Tag Automator.")
+                break # Exit the main loop
+
+        elif main_choice == '11': # Exit option moved to 11
+            print("Exiting Tag Automator.")
+            break # Exit the main loop
+        else:
+            print("Invalid choice. Please enter 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, or 11.")
