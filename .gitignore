@@ -50,3 +50,5 @@ _demo_vault/
 automator_config.json
 tag_aliases.json
 tags_database.json
+
+config.json
