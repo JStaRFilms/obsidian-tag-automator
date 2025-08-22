@@ -1,3 +1,14 @@
+Great! Now let's create the interface adapters. We'll start with the CLI interface and then move to the web interface.
+
+## Step 3: Interface Adapters
+
+### File: `interfaces/__init__.py`
+```python
+# Interface adapters for Obsidian Tag Automator
+```
+
+### File: `interfaces/cli_interface.py`
+```python
 import os
 import json
 import argparse
@@ -610,3 +621,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
+
+Now let me know when you're ready for the web interface adapter!

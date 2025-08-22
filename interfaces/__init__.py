@@ -1,1 +1,1 @@
-# This makes interfaces a Python package
+# Interface adapters for Obsidian Tag Automator
