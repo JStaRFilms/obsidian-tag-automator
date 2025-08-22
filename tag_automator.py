@@ -10,7 +10,7 @@ import yaml
 # Constants for better maintainability
 MAX_TAGS_PER_FILE = 15
 MAX_AI_RETRIES = 10
-INITIAL_RETRY_DELAY = 2  # seconds
+INITIAL_RETRY_DELAY = 1  # seconds
 MAX_ALIAS_LENGTH_DIFF = 10
 
 # Try to import the tag extractor, with fallback if not available
@@ -80,8 +80,8 @@ class ObsidianTagAutomator:
         if gemini_api_key and genai is not None:
             try:
                 genai.configure(api_key=gemini_api_key)
-                # Using gemini-2.5-flash as it's generally available and cost-effective
-                self.gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+                # Using gemini-2.5-flash-lite as it's generally available and cost-effective
+                self.gemini_model = genai.GenerativeModel('gemini-2.5-flash-lite')
             except Exception as e:
                 self.gemini_model = None
                 print(f"Warning: Failed to configure Gemini API: {e}. AI tag suggestions will not be available.")
@@ -249,6 +249,77 @@ Instructions:
         
         return suggested_aliases
     
+    def _generate_ai_suggested_aliases(self):
+        """
+        Uses AI to analyze existing tags and suggest potential aliases.
+        This method sends the list of all tags to the AI and asks it to identify
+        tags that could be aliases of each other (e.g., 'next-js' and 'nextjs').
+        
+        Returns:
+            dict: A dictionary where keys are potential alias tags and values are their suggested canonical forms.
+        """
+        if not self.gemini_model:
+            print("Gemini API not configured. Using heuristic-based alias suggestions.")
+            return self._generate_suggested_aliases()  # Fall back to the original method
+        
+        all_tags = self._get_all_tags_from_vault()
+        if not all_tags:
+            print("No tags found in the vault to analyze for aliases.")
+            return {}
+        
+        # Create a prompt for the AI to suggest aliases
+        prompt = f"""
+You are an AI assistant for identifying tag aliases in an Obsidian vault. Your goal is to analyze the list of tags and suggest aliases where multiple tags represent the same concept.
+
+Here is the list of all tags in the vault:
+{', '.join(all_tags)}
+
+Instructions:
+1. Identify tags that are variations of each other (e.g., 'nextjs', 'next-js', 'next.js').
+2. For each group of related tags, choose the most concise and standard form as the canonical tag.
+3. Return a JSON object where keys are the alias tags and values are their canonical tags.
+4. Only suggest aliases where you are confident they represent the same concept.
+5. Format your response as a valid JSON object only, with no additional text.
+
+Example response format:
+{{
+  "next-js": "nextjs",
+  "react.js": "reactjs",
+  "ai-tools": "aitools"
+}}
+"""
+        
+        try:
+            response = self.gemini_model.generate_content(prompt)
+            response_text = response.text.strip()
+            
+            # Try to parse the response as JSON
+            try:
+                suggested_aliases = json.loads(response_text)
+                # Validate that the response is a dictionary
+                if not isinstance(suggested_aliases, dict):
+                    print("AI response is not a valid dictionary. Falling back to heuristic suggestions.")
+                    return self._generate_suggested_aliases()
+                
+                # Clean the suggested aliases
+                cleaned_aliases = {}
+                for alias, canonical in suggested_aliases.items():
+                    cleaned_alias = self._clean_tag_format(alias)
+                    cleaned_canonical = self._clean_tag_format(canonical)
+                    if cleaned_alias != cleaned_canonical:  # Don't alias a tag to itself
+                        cleaned_aliases[cleaned_alias] = cleaned_canonical
+                
+                print(f"AI suggested {len(cleaned_aliases)} potential aliases.")
+                return cleaned_aliases
+                
+            except json.JSONDecodeError as e:
+                print(f"Failed to parse AI response as JSON: {e}. Falling back to heuristic suggestions.")
+                return self._generate_suggested_aliases()
+                
+        except Exception as e:
+            print(f"Error getting AI suggested aliases: {e}. Falling back to heuristic suggestions.")
+            return self._generate_suggested_aliases()
+
     def _save_tag_aliases(self, aliases):
         """
         Saves the provided tag aliases dictionary to `tag_aliases.json`.
@@ -849,12 +920,13 @@ Instructions:
     
     def _interactive_alias_review(self, suggested_aliases):
         """
-        Presents a list of automatically suggested tag aliases to the user for review.
+        Presents a list of suggested tag aliases to the user for review and modification.
+        The user can approve all, reject all, review individually, or modify suggestions.
         
         Args:
             suggested_aliases (dict): A dictionary where keys are potential alias tags
-                                      and values are their suggested canonical forms.
-            
+                                  and values are their suggested canonical forms.
+        
         Returns:
             dict: A dictionary containing only the aliases that were approved by the user.
         """
@@ -864,26 +936,112 @@ Instructions:
         if not suggested_aliases:
             print("No aliases to review.")
             return {}
+        
+        # First, ask if the user wants to review all at once or individually
+        print(f"\nFound {len(suggested_aliases)} suggested aliases.")
+        print("Options:")
+        print("  (a)ccept all - Accept all suggested aliases")
+        print("  (r)eject all - Reject all suggested aliases")
+        print("  (i)ndividual review - Review each alias individually")
+        print("  (m)anual edit - Edit aliases in a JSON file")
+        
+        while True:
+            choice = input("Choose an option (a/r/i/m): ").strip().lower()
             
-        for alias, canonical in suggested_aliases.items():
-            while True:
-                choice = input(f"Approve '{alias}' -> '{canonical}'? (yes/no/skip): ").strip().lower()
+            if choice == 'a':
+                # Accept all aliases
+                approved_aliases = suggested_aliases.copy()
+                print(f"Accepted all {len(approved_aliases)} suggested aliases.")
+                break
                 
-                if choice == 'yes':
-                    approved_aliases[alias] = canonical
-                    break
+            elif choice == 'r':
+                # Reject all aliases
+                print("Rejected all suggested aliases.")
+                break
+                
+            elif choice == 'i':
+                # Review each alias individually
+                for alias, canonical in suggested_aliases.items():
+                    while True:
+                        print(f"\nSuggested Alias: '{alias}' -> '{canonical}'")
+                        choice = input("Actions: (a)pprove, (r)eject, (m)odify, (s)kip remaining: ").strip().lower()
+                        
+                        if choice == 'a':
+                            approved_aliases[alias] = canonical
+                            print(f"Approved: '{alias}' -> '{canonical}'")
+                            break
+                            
+                        elif choice == 'r':
+                            print(f"Rejected: '{alias}' -> '{canonical}'")
+                            break
+                            
+                        elif choice == 'm':
+                            new_alias = input(f"Enter new alias (current: '{alias}'): ").strip()
+                            new_canonical = input(f"Enter new canonical (current: '{canonical}'): ").strip()
+                            
+                            if new_alias and new_canonical:
+                                cleaned_alias = self._clean_tag_format(new_alias)
+                                cleaned_canonical = self._clean_tag_format(new_canonical)
+                                
+                                if cleaned_alias != cleaned_canonical:  # Don't alias a tag to itself
+                                    approved_aliases[cleaned_alias] = cleaned_canonical
+                                    print(f"Modified and approved: '{cleaned_alias}' -> '{cleaned_canonical}'")
+                                else:
+                                    print("Cannot alias a tag to itself. Skipping.")
+                            else:
+                                print("Both alias and canonical must be specified. Skipping.")
+                            break
+                            
+                        elif choice == 's':
+                            print("Skipping remaining aliases.")
+                            return approved_aliases  # Return what's approved so far
+                            
+                        else:
+                            print("Invalid choice. Please enter 'a', 'r', 'm', or 's'.")
+                break
+                
+            elif choice == 'm':
+                # Provide the aliases in a format that can be easily edited
+                alias_path = self.vault_path / "suggested_aliases_for_edit.json"
+                try:
+                    with open(alias_path, 'w', encoding='utf-8') as f:
+                        json.dump(suggested_aliases, f, indent=2)
+                    print(f"Suggested aliases saved to {alias_path}")
+                    print("Edit this file in your preferred editor, then save and close it when done.")
+                    input("Press Enter when you have finished editing the file...")
                     
-                elif choice == 'no':
-                    print(f"Alias '{alias}' -> '{canonical}' rejected.")
-                    break
-                    
-                elif choice == 'skip':
-                    print("Skipping remaining aliases.")
-                    return approved_aliases  # Return what's approved so far
-                    
-                else:
-                    print("Invalid choice. Please enter 'yes', 'no', or 'skip'.")
-                    
+                    # Load the edited aliases
+                    try:
+                        with open(alias_path, 'r', encoding='utf-8') as f:
+                            edited_aliases = json.load(f)
+                        
+                        # Validate and clean the edited aliases
+                        for alias, canonical in edited_aliases.items():
+                            cleaned_alias = self._clean_tag_format(alias)
+                            cleaned_canonical = self._clean_tag_format(canonical)
+                            
+                            if cleaned_alias != cleaned_canonical:  # Don't alias a tag to itself
+                                approved_aliases[cleaned_alias] = cleaned_canonical
+                        
+                        print(f"Loaded {len(approved_aliases)} edited aliases.")
+                        
+                        # Clean up the temporary file
+                        try:
+                            os.remove(alias_path)
+                            print("Temporary alias file removed.")
+                        except OSError:
+                            print(f"Warning: Could not remove temporary file {alias_path}")
+                            
+                    except (json.JSONDecodeError, IOError) as e:
+                        print(f"Error loading edited aliases: {e}. No aliases will be saved.")
+                        
+                except IOError as e:
+                    print(f"Error saving aliases for editing: {e}")
+                break
+                
+            else:
+                print("Invalid choice. Please enter 'a', 'r', 'i', or 'm'.")
+        
         return approved_aliases
     
     def add_excluded_tag(self, tag):
@@ -1421,7 +1579,18 @@ if __name__ == "__main__":
         elif main_choice == '2':
             print("\nGenerating suggested tag aliases...")
             automator._update_tag_database()  # Ensure tag database is fresh
-            suggested_aliases = automator._generate_suggested_aliases()
+            
+            # Ask user whether to use AI or heuristic-based suggestions
+            use_ai = "yes"
+            if automator.gemini_model:
+                use_ai = input("Use AI to suggest aliases? (yes/no, default: yes): ").strip().lower()
+                if not use_ai:
+                    use_ai = "yes"
+            
+            if use_ai == "yes" and automator.gemini_model:
+                suggested_aliases = automator._generate_ai_suggested_aliases()
+            else:
+                suggested_aliases = automator._generate_suggested_aliases()
             
             if suggested_aliases:
                 # Call interactive alias review
@@ -1432,7 +1601,7 @@ if __name__ == "__main__":
                     current_aliases = automator._load_tag_aliases()
                     current_aliases.update(approved_aliases)
                     automator._save_tag_aliases(current_aliases)
-                    print("Approved tag aliases saved/updated in tag_aliases.json.")
+                    print(f"Approved {len(approved_aliases)} tag aliases. Saved to tag_aliases.json.")
                 else:
                     print("No aliases approved or saved.")
             else:
