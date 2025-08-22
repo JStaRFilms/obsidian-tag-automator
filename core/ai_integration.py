@@ -1,0 +1,1 @@
+# AI integration for tag suggestions/automation
