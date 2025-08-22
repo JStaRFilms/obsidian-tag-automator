@@ -6,7 +6,6 @@ import random
 from pathlib import Path
 from dotenv import load_dotenv
 import yaml
-from ui_styler import AgenticUI
 
 # Constants for better maintainability
 MAX_TAGS_PER_FILE = 15
@@ -1568,31 +1567,30 @@ Example response format:
 # Example usage (for testing purposes)
 if __name__ == "__main__":
     VAULT_PATH = r"e:\Creator_Command_Hub_Obsidian"
+    
+    # Instantiate without passing an API key explicitly. The constructor will
+    # read GEMINI_API_KEY from the environment if available.
     automator = ObsidianTagAutomator(VAULT_PATH)
-    ui = AgenticUI()  # Initialize the UI
     
     while True:
-        ui.display_title("Obsidian Tag Automator")
+        print("\nObsidian Tag Automator")
+        print("----------------------")
         
-        # Display menu options
-        menu_options = [
-            "Run Tagging Automator (process Markdown files)",
-            "Generate and Review Suggested Tag Aliases",
-            "Clear Tags from Files",
-            "Rename/Refactor a Tag",
-            "Merge Tags",
-            "Configure AI Prompt",
-            "Manage Tag/File Exclusions",
-            "Interactive Tag Review and Approval",
-            "Interactive Alias Review and Approval",
-            "Validate Tags (Find Orphans and Malformed Tags)",
-            "Apply Tag Aliases to Entire Vault",
-            "Exit"
-        ]
-        ui.display_menu(menu_options)
+        print("\nMain Menu:")
+        print("  1. Run Tagging Automator (process Markdown files)")
+        print("  2. Generate and Review Suggested Tag Aliases")
+        print("  3. Clear Tags from Files")
+        print("  4. Rename/Refactor a Tag")
+        print("  5. Merge Tags")
+        print("  6. Configure AI Prompt")
+        print("  7. Manage Tag/File Exclusions")
+        print("  8. Interactive Tag Review and Approval")
+        print("  9. Interactive Alias Review and Approval")
+        print("  10. Validate Tags (Find Orphans and Malformed Tags)")
+        print("  11. Apply Tag Aliases to Entire Vault")
+        print("  12. Exit")
         
-        # Get user input
-        main_choice = ui.get_user_choice("Enter your choice (1-12)").strip()
+        main_choice = input("Enter your choice (1-12): ").strip()
         
         # Helper function to get files based on user choice
         def _get_files_from_user_choice(vault_path, prompt_message):
@@ -1671,16 +1669,14 @@ if __name__ == "__main__":
             return files_selected
         
         if main_choice == '1':
-            ui.display_info("Re-tagging options:")
-            re_tag_options = [
-                "Only process files that have NOT been AI-tagged before",
-                "Re-tag ALL files, including those previously AI-tagged",
-                "Only re-tag files that have existing tags but are NOT AI-tagged",
-                "Do NOT re-tag any files that already have tags",
-                "Interactive Tag Review and Approval"
-            ]
-            ui.display_menu(re_tag_options)
-            re_tag_option = ui.get_user_choice("Enter your re-tagging choice (1, 2, 3, 4, or 5)").strip()
+            print("\nRe-tagging options:")
+            print("  1. Only process files that have NOT been AI-tagged before (no 'ai_processed' flag).")
+            print("  2. Re-tag ALL files, including those previously AI-tagged.")
+            print("  3. Only re-tag files that have existing tags but are NOT AI-tagged.")
+            print("  4. Do NOT re-tag any files that already have tags.")
+            print("  5. Interactive Tag Review and Approval (for AI-suggested tags)")
+            
+            re_tag_option = input("Enter your re-tagging choice (1, 2, 3, 4, or 5): ").strip()
             files_to_process = _get_files_from_user_choice(VAULT_PATH, "Choose files to process:")
             
             if files_to_process:
@@ -1757,9 +1753,9 @@ if __name__ == "__main__":
                 break  # Exit the main loop
         
         elif main_choice == '5':
-            ui.display_title("Tag Merging Tool")
-            source_tag = ui.get_user_choice("Enter the tag to merge FROM (source tag): ").strip().lower()
-            target_tag = ui.get_user_choice("Enter the tag to merge INTO (target tag): ").strip().lower()
+            print("\nTag Merging Tool")
+            source_tag = input("Enter the tag to merge FROM (source tag): ").strip().lower()
+            target_tag = input("Enter the tag to merge INTO (target tag): ").strip().lower()
             
             if not source_tag or not target_tag:
                 print("Source tag and target tag cannot be empty. Returning to main menu.")
@@ -1898,9 +1894,9 @@ if __name__ == "__main__":
                 break  # Exit the main loop
         
         elif main_choice == '11':  # Apply tag aliases to entire vault
-            ui.display_title("Apply Tag Aliases to Entire Vault")
-            ui.display_info("This will apply all defined tag aliases to every Markdown file in your vault.")
-            ui.display_info("Tags that match an alias will be replaced with their canonical form.")
+            print("\nApply Tag Aliases to Entire Vault")
+            print("This will apply all defined tag aliases to every Markdown file in your vault.")
+            print("Tags that match an alias will be replaced with their canonical form.")
             
             # Ask if user wants a dry run first
             dry_run = input("Run in dry-run mode first to see what would change? (yes/no, default: yes): ").strip().lower()
