@@ -1330,6 +1330,117 @@ Example response format:
         print("Tag database updated to reflect tag merge.")
         print(f"Tag '{source_tag}' successfully merged into '{target_tag}' everywhere.")
     
+    def apply_aliases_to_vault(self, dry_run=False):
+        """
+        Applies the current tag aliases to all Markdown files in the vault.
+        This method goes through every file, checks its tags, and replaces any
+        alias tags with their canonical forms.
+        
+        Args:
+            dry_run (bool): If True, only shows what changes would be made without
+                            actually modifying any files.
+        
+        Returns:
+            dict: A dictionary with statistics about the changes made (or that would be made).
+        """
+        print("\n--- Applying Tag Aliases to Vault ---")
+        
+        # Load the current aliases
+        if not self.tag_aliases:
+            print("No tag aliases defined. Nothing to apply.")
+            return {"files_processed": 0, "tags_replaced": 0, "files_modified": 0}
+        
+        print(f"Found {len(self.tag_aliases)} tag aliases to apply:")
+        for alias, canonical in self.tag_aliases.items():
+            print(f"  '{alias}' -> '{canonical}'")
+        
+        if dry_run:
+            print("\nDRY RUN MODE: No files will be modified.")
+        else:
+            print("\nWARNING: This will modify files in your vault.")
+            confirm = input("Are you sure you want to continue? (yes/no): ").strip().lower()
+            if confirm != "yes":
+                print("Operation cancelled.")
+                return {"files_processed": 0, "tags_replaced": 0, "files_modified": 0}
+        
+        # Statistics
+        stats = {
+            "files_processed": 0,
+            "tags_replaced": 0,
+            "files_modified": 0
+        }
+        
+        # Process all Markdown files in the vault
+        for root, _, files in os.walk(self.vault_path):
+            for file in files:
+                file_path = Path(root) / file
+                if file_path.suffix.lower() == '.md' and '.obsidian' not in file_path.parts:
+                    stats["files_processed"] += 1
+                    
+                    # Extract front matter and content
+                    front_matter_raw, main_content = self._extract_front_matter_and_content(file_path)
+                    parsed_front_matter = self._parse_front_matter(front_matter_raw) if front_matter_raw else {}
+                    
+                    # Check if the file has tags
+                    if 'tags' not in parsed_front_matter or not parsed_front_matter['tags']:
+                        continue
+                    
+                    original_tags = list(parsed_front_matter['tags'])
+                    updated_tags = []
+                    tags_changed = False
+                    
+                    # Apply aliases to each tag
+                    for tag in original_tags:
+                        # Check if this tag is an alias
+                        if tag in self.tag_aliases:
+                            # Replace with canonical form
+                            canonical_tag = self.tag_aliases[tag]
+                            updated_tags.append(canonical_tag)
+                            stats["tags_replaced"] += 1
+                            tags_changed = True
+                            print(f"  In {file_path.name}: '{tag}' -> '{canonical_tag}'")
+                        else:
+                            # Keep the tag as is
+                            updated_tags.append(tag)
+                    
+                    # If tags were changed, update the file
+                    if tags_changed:
+                        # Remove duplicates while preserving order
+                        seen = set()
+                        unique_tags = []
+                        for tag in updated_tags:
+                            if tag not in seen:
+                                seen.add(tag)
+                                unique_tags.append(tag)
+                        
+                        # Update front matter
+                        parsed_front_matter['tags'] = unique_tags
+                        
+                        # Serialize and write back (if not dry run)
+                        if not dry_run:
+                            updated_front_matter = self._serialize_front_matter(parsed_front_matter)
+                            new_file_content = updated_front_matter + main_content
+                            
+                            with open(file_path, 'w', encoding='utf-8') as f:
+                                f.write(new_file_content)
+                            
+                            stats["files_modified"] += 1
+                            print(f"  Updated: {file_path}")
+                    else:
+                        print(f"  No changes needed: {file_path}")
+        
+        # Print summary
+        print("\n--- Alias Application Summary ---")
+        print(f"Files processed: {stats['files_processed']}")
+        print(f"Tags replaced: {stats['tags_replaced']}")
+        
+        if dry_run:
+            print(f"Files that would be modified: {stats['files_modified']}")
+        else:
+            print(f"Files modified: {stats['files_modified']}")
+        
+        return stats
+    
     def validate_tags(self):
         """
         Validates tags across all Markdown files in the vault.
@@ -1476,9 +1587,10 @@ if __name__ == "__main__":
         print("  8. Interactive Tag Review and Approval")
         print("  9. Interactive Alias Review and Approval")
         print("  10. Validate Tags (Find Orphans and Malformed Tags)")
-        print("  11. Exit")
+        print("  11. Apply Tag Aliases to Entire Vault")
+        print("  12. Exit")
         
-        main_choice = input("Enter your choice (1-11): ").strip()
+        main_choice = input("Enter your choice (1-12): ").strip()
         
         # Helper function to get files based on user choice
         def _get_files_from_user_choice(vault_path, prompt_message):
@@ -1781,9 +1893,42 @@ if __name__ == "__main__":
                 print("Exiting Tag Automator.")
                 break  # Exit the main loop
         
-        elif main_choice == '11':  # Exit
+        elif main_choice == '11':  # Apply tag aliases to entire vault
+            print("\nApply Tag Aliases to Entire Vault")
+            print("This will apply all defined tag aliases to every Markdown file in your vault.")
+            print("Tags that match an alias will be replaced with their canonical form.")
+            
+            # Ask if user wants a dry run first
+            dry_run = input("Run in dry-run mode first to see what would change? (yes/no, default: yes): ").strip().lower()
+            if not dry_run:
+                dry_run = "yes"
+            
+            if dry_run == "yes":
+                print("\nRunning in dry-run mode...")
+                stats = automator.apply_aliases_to_vault(dry_run=True)
+                
+                if stats["tags_replaced"] > 0:
+                    # Ask if user wants to proceed with actual changes
+                    proceed = input("\nDo you want to apply these changes for real? (yes/no): ").strip().lower()
+                    if proceed == "yes":
+                        print("\nApplying tag aliases to vault...")
+                        stats = automator.apply_aliases_to_vault(dry_run=False)
+                    else:
+                        print("No changes made.")
+                else:
+                    print("\nNo changes would be made. Your vault is already consistent with the current aliases.")
+            else:
+                print("\nApplying tag aliases to vault...")
+                stats = automator.apply_aliases_to_vault(dry_run=False)
+            
+            continue_choice = input("\nTag alias application finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
+            if continue_choice == 'exit':
+                print("Exiting Tag Automator.")
+                break  # Exit the main loop
+
+        elif main_choice == '12':  # Exit option moved to 12
             print("Exiting Tag Automator.")
             break  # Exit the main loop
         
         else:
-            print("Invalid choice. Please enter 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, or 11.")
+            print("Invalid choice. Please enter 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, or 12.")
