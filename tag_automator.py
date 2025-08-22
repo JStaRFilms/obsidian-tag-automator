@@ -3,10 +3,43 @@ import re
 import json
 import time
 import random
+import argparse
 from pathlib import Path
 from dotenv import load_dotenv
 import yaml
 from ui_styler import AgenticUI
+
+def detect_vault_path():
+    """
+    Attempts to detect the Obsidian vault path based on the current working directory.
+    If the vault path is not found, it prompts the user to input the path manually.
+    
+    Returns:
+        Path: The detected or user-provided Obsidian vault path.
+    """
+    # Try to find the vault path based on the current working directory
+    cwd = Path.cwd()
+    while cwd != cwd.parent:
+        if (cwd / ".obsidian").exists():
+            return cwd
+        cwd = cwd.parent
+    
+    # If not found, prompt the user to input the vault path
+    print("Obsidian vault path not detected. Please enter the path manually:")
+    vault_path = input("> ")
+    return Path(vault_path)
+
+def parse_args():
+    """
+    Parses command-line arguments for the script.
+    
+    Returns:
+        argparse.Namespace: The parsed command-line arguments.
+    """
+    parser = argparse.ArgumentParser(description="Obsidian Tag Automator")
+    parser.add_argument("-v", "--vault-path", help="Path to the Obsidian vault")
+    parser.add_argument("-k", "--gemini-api-key", help="Gemini API key for AI tag suggestions")
+    return parser.parse_args()
 
 # Constants for better maintainability
 MAX_TAGS_PER_FILE = 15
@@ -35,7 +68,6 @@ except ImportError:
     
     class StopCandidateException(Exception):
         pass
-
 
 class ObsidianTagAutomator:
     """
@@ -271,17 +303,14 @@ Instructions:
         # Create a prompt for the AI to suggest aliases
         prompt = f"""
 You are an AI assistant for identifying tag aliases in an Obsidian vault. Your goal is to analyze the list of tags and suggest aliases where multiple tags represent the same concept.
-
 Here is the list of all tags in the vault:
 {', '.join(all_tags)}
-
 Instructions:
 1. Identify tags that are variations of each other (e.g., 'nextjs', 'next-js', 'next.js').
 2. For each group of related tags, choose the most concise and standard form as the canonical tag.
 3. Return a JSON object where keys are the alias tags and values are their canonical tags.
 4. Only suggest aliases where you are confident they represent the same concept.
 5. Format your response as a valid JSON object only, with no additional text.
-
 Example response format:
 {{
   "next-js": "nextjs",
@@ -320,7 +349,7 @@ Example response format:
         except Exception as e:
             print(f"Error getting AI suggested aliases: {e}. Falling back to heuristic suggestions.")
             return self._generate_suggested_aliases()
-
+    
     def _save_tag_aliases(self, aliases):
         """
         Saves the provided tag aliases dictionary to `tag_aliases.json`.
@@ -1564,10 +1593,211 @@ Example response format:
         else:
             print("Skipping final tag database update.")
 
+def is_obsidian_vault(path):
+    """Check if the given path is a valid Obsidian vault."""
+    try:
+        return (Path(path) / '.obsidian').exists()
+    except Exception:
+        return False
 
-# Example usage (for testing purposes)
+def get_vault_path(args=None):
+    """
+    Determine the vault path using the following fallback order:
+    1. Command-line argument (--vault-path)
+    2. Config file (--config or config.json)
+    3. Environment variable (OBSIDIAN_VAULT_PATH)
+    4. Current working directory
+    5. Prompt the user if no valid vault is found
+    """
+    # Parse command-line arguments if not provided
+    if args is None:
+        parser = argparse.ArgumentParser(description='Obsidian Tag Automator')
+        parser.add_argument('--vault-path', type=str, 
+                          help='Path to the Obsidian vault')
+        parser.add_argument('--config', type=str, 
+                          help='Path to configuration file')
+        args = parser.parse_args()
+    
+    # Load configuration file if specified or if default exists
+    config = {}
+    config_path = Path(args.config) if args.config else Path('config.json')
+    
+    if config_path.exists():
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+        except Exception as e:
+            print(f"Warning: Could not load config file: {e}")
+    
+    # Determine vault path with fallbacks
+    vault_path = None
+    
+    if args.vault_path:
+        vault_path = Path(args.vault_path)
+    elif config.get('vault_path'):
+        vault_path = Path(config['vault_path'])
+    elif os.getenv('OBSIDIAN_VAULT_PATH'):
+        vault_path = Path(os.getenv('OBSIDIAN_VAULT_PATH'))
+    else:
+        vault_path = Path.cwd()
+    
+    # Check if the path is valid, if not prompt the user
+    if not vault_path.exists() or not is_obsidian_vault(vault_path):
+        print(f"Current path '{vault_path}' doesn't appear to be a valid Obsidian vault.")
+        while True:
+            user_path = input("Please enter the path to your Obsidian vault (or 'q' to quit): ").strip()
+            if user_path.lower() == 'q':
+                print("Exiting...")
+                exit(0)
+                
+            if user_path:
+                test_path = Path(user_path)
+                if test_path.exists() and is_obsidian_vault(test_path):
+                    vault_path = test_path
+                    # Save to config for next time
+                    config['vault_path'] = str(test_path)
+                    try:
+                        with open('config.json', 'w') as f:
+                            json.dump(config, f, indent=2)
+                        print("Vault path saved to config.json for future use.")
+                    except Exception as e:
+                        print(f"Warning: Could not save config: {e}")
+                    break
+                print(f"Path '{user_path}' is not a valid Obsidian vault. Please try again.")
+    
+    return vault_path
+
+def _get_files_from_user_choice(vault_path, prompt_message, ui):
+    """Helper function to get files based on user choice."""
+    print(f"\n{prompt_message}")
+    print("1. Process specific Markdown files (enter paths manually)")
+    print("2. Process ALL Markdown files in the vault")
+    print("3. Process all Markdown files within a specific directory")
+    
+    choice = ui.get_user_choice("Enter your file selection choice (1, 2, or 3)").strip()
+    files_selected = []
+    
+    if choice == '1':
+        while True:
+            file_input = ui.get_user_choice("Enter the path to a Markdown file (relative to vault, or full path), or 'done' to finish:").strip()
+            if file_input.lower() == 'done':
+                break
+            
+            # Strip quotes if present
+            if file_input.startswith('"') and file_input.endswith('"'):
+                file_input = file_input[1:-1]
+            if file_input.startswith("'") and file_input.endswith("'"):
+                file_input = file_input[1:-1]
+            
+            file_path = Path(file_input)
+            if not file_path.is_absolute():
+                file_path = Path(vault_path) / file_input
+            
+            if file_path.exists() and file_path.suffix.lower() == '.md':
+                files_selected.append(file_path)
+            else:
+                print(f"Invalid file path or not a Markdown file: '{file_input}'. Please try again.")
+        
+        if not files_selected:
+            print("No files selected. Returning to main menu.")
+            
+    elif choice == '2':
+        print("Scanning vault for all Markdown files...")
+        for root, _, files in os.walk(vault_path):
+            for file in files:
+                file_path = Path(root) / file
+                if file_path.suffix.lower() == '.md' and '.obsidian' not in file_path.parts:
+                    files_selected.append(file_path)
+        print(f"Found {len(files_selected)} Markdown files.")
+        
+    elif choice == '3':
+        while True:
+            dir_input = ui.get_user_choice("Enter the path to the directory (relative to vault, or full path):").strip()
+            
+            # Strip quotes if present
+            if dir_input.startswith('"') and dir_input.endswith('"'):
+                dir_input = dir_input[1:-1]
+            if dir_input.startswith("'") and dir_input.endswith("'"):
+                dir_input = dir_input[1:-1]
+            
+            dir_path = Path(dir_input)
+            if not dir_path.is_absolute():
+                dir_path = Path(vault_path) / dir_input
+            
+            if dir_path.is_dir():
+                print(f"Scanning directory '{dir_path}' for Markdown files...")
+                for root, _, files in os.walk(dir_path):
+                    for file in files:
+                        file_path = Path(root) / file
+                        if file_path.suffix.lower() == '.md' and '.obsidian' not in file_path.parts:
+                            files_selected.append(file_path)
+                print(f"Found {len(files_selected)} Markdown files in '{dir_path}'.")
+                break
+            else:
+                print(f"Invalid directory path: '{dir_input}'. Please try again.")
+        
+        if not files_selected:
+            print("No Markdown files found in the specified directory. Returning to main menu.")
+    else:
+        print("Invalid choice. Returning to main menu.")
+        
+    return files_selected
+
+def change_vault_path(ui):
+    """Function to change the vault path."""
+    ui.display_info("Current vault path: {}".format(VAULT_PATH))
+    new_path = ui.get_user_choice("\nEnter new vault path (or leave blank to cancel):")
+    
+    if not new_path.strip():
+        ui.display_info("Vault path change cancelled.")
+        return True  # Continue running
+    
+    new_path_obj = Path(new_path)
+    if not new_path_obj.exists():
+        ui.display_error("Error: The specified path does not exist.")
+        return True  # Continue running
+    
+    if not is_obsidian_vault(new_path_obj):
+        ui.display_warning("Warning: The specified path does not appear to be an Obsidian vault (no .obsidian folder).")
+        if not ui.confirm_action("Continue anyway?"):
+            return True  # Continue running
+    
+    # Load existing config
+    config = {}
+    config_path = Path('config.json')
+    if config_path.exists():
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+        except Exception as e:
+            ui.display_error(f"Error loading config: {e}")
+    
+    # Update config with new path
+    config['vault_path'] = str(new_path_obj)
+    
+    # Save config
+    try:
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+        ui.display_success(f"Vault path changed to: {new_path}")
+        ui.display_info("Please restart the application for the change to take effect.")
+        return False  # Indicate that the application should exit
+    except Exception as e:
+        ui.display_error(f"Error saving config: {e}")
+        return True  # Continue running
+
+def _handle_continue_prompt(ui):
+    """Handle the continue prompt after each operation."""
+    continue_choice = ui.get_user_choice("\nOperation finished. Do you want to return to the main menu or exit? (menu/exit):").strip().lower()
+    if continue_choice == 'exit':
+        print("Exiting Tag Automator.")
+        return False  # Exit the main loop
+    return True  # Continue to main menu
+
+# Main program
 if __name__ == "__main__":
-    VAULT_PATH = r"e:\Creator_Command_Hub_Obsidian"
+    # Get vault path using the new function
+    VAULT_PATH = get_vault_path()
     automator = ObsidianTagAutomator(VAULT_PATH)
     ui = AgenticUI()  # Initialize the UI
     
@@ -1583,6 +1813,7 @@ if __name__ == "__main__":
             "Merge Tags",
             "Configure AI Prompt",
             "Manage Tag/File Exclusions",
+            "Set/Change Vault Path ({})".format(VAULT_PATH),  # Show current vault path in menu
             "Interactive Tag Review and Approval",
             "Interactive Alias Review and Approval",
             "Validate Tags (Find Orphans and Malformed Tags)",
@@ -1592,83 +1823,7 @@ if __name__ == "__main__":
         ui.display_menu(menu_options)
         
         # Get user input
-        main_choice = ui.get_user_choice("Enter your choice (1-12)").strip()
-        
-        # Helper function to get files based on user choice
-        def _get_files_from_user_choice(vault_path, prompt_message):
-            print(f"\n{prompt_message}")
-            print("1. Process specific Markdown files (enter paths manually)")
-            print("2. Process ALL Markdown files in the vault")
-            print("3. Process all Markdown files within a specific directory")
-            
-            choice = input("Enter your file selection choice (1, 2, or 3): ").strip()
-            files_selected = []
-            
-            if choice == '1':
-                while True:
-                    file_input = input("Enter the path to a Markdown file (relative to vault, or full path), or 'done' to finish: ").strip()
-                    if file_input.lower() == 'done':
-                        break
-                    
-                    # Strip quotes if present
-                    if file_input.startswith('"') and file_input.endswith('"'):
-                        file_input = file_input[1:-1]
-                    if file_input.startswith("'") and file_input.endswith("'"):
-                        file_input = file_input[1:-1]
-                    
-                    file_path = Path(file_input)
-                    if not file_path.is_absolute():
-                        file_path = Path(vault_path) / file_input
-                    
-                    if file_path.exists() and file_path.suffix.lower() == '.md':
-                        files_selected.append(file_path)
-                    else:
-                        print(f"Invalid file path or not a Markdown file: '{file_input}'. Please try again.")
-                
-                if not files_selected:
-                    print("No files selected. Returning to main menu.")
-                    
-            elif choice == '2':
-                print("Scanning vault for all Markdown files...")
-                for root, _, files in os.walk(vault_path):
-                    for file in files:
-                        file_path = Path(root) / file
-                        if file_path.suffix.lower() == '.md' and '.obsidian' not in file_path.parts:
-                            files_selected.append(file_path)
-                print(f"Found {len(files_selected)} Markdown files.")
-                
-            elif choice == '3':
-                while True:
-                    dir_input = input("Enter the path to the directory (relative to vault, or full path): ").strip()
-                    
-                    # Strip quotes if present
-                    if dir_input.startswith('"') and dir_input.endswith('"'):
-                        dir_input = dir_input[1:-1]
-                    if dir_input.startswith("'") and dir_input.endswith("'"):
-                        dir_input = dir_input[1:-1]
-                    
-                    dir_path = Path(dir_input)
-                    if not dir_path.is_absolute():
-                        dir_path = Path(vault_path) / dir_input
-                    
-                    if dir_path.is_dir():
-                        print(f"Scanning directory '{dir_path}' for Markdown files...")
-                        for root, _, files in os.walk(dir_path):
-                            for file in files:
-                                file_path = Path(root) / file
-                                if file_path.suffix.lower() == '.md' and '.obsidian' not in file_path.parts:
-                                    files_selected.append(file_path)
-                        print(f"Found {len(files_selected)} Markdown files in '{dir_path}'.")
-                        break
-                    else:
-                        print(f"Invalid directory path: '{dir_input}'. Please try again.")
-                
-                if not files_selected:
-                    print("No Markdown files found in the specified directory. Returning to main menu.")
-            else:
-                print("Invalid choice. Returning to main menu.")
-                
-            return files_selected
+        main_choice = ui.get_user_choice("Enter your choice (1-13)").strip()
         
         if main_choice == '1':
             ui.display_info("Re-tagging options:")
@@ -1681,17 +1836,14 @@ if __name__ == "__main__":
             ]
             ui.display_menu(re_tag_options)
             re_tag_option = ui.get_user_choice("Enter your re-tagging choice (1, 2, 3, 4, or 5)").strip()
-            files_to_process = _get_files_from_user_choice(VAULT_PATH, "Choose files to process:")
+            files_to_process = _get_files_from_user_choice(VAULT_PATH, "Choose files to process:", ui)
             
             if files_to_process:
                 automator.run_automator(files_to_process, re_tag_option)
             
-            # After running automator, ask if user wants to continue or exit
-            continue_choice = input("\nTagging process finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
-            if continue_choice == 'exit':
-                print("Exiting Tag Automator.")
+            if not _handle_continue_prompt(ui):
                 break  # Exit the main loop
-            
+        
         elif main_choice == '2':
             print("\nGenerating suggested tag aliases...")
             automator._update_tag_database()  # Ensure tag database is fresh
@@ -1699,7 +1851,7 @@ if __name__ == "__main__":
             # Ask user whether to use AI or heuristic-based suggestions
             use_ai = "yes"
             if automator.gemini_model:
-                use_ai = input("Use AI to suggest aliases? (yes/no, default: yes): ").strip().lower()
+                use_ai = ui.get_user_choice("Use AI to suggest aliases? (yes/no, default: yes):").strip().lower()
                 if not use_ai:
                     use_ai = "yes"
             
@@ -1723,26 +1875,21 @@ if __name__ == "__main__":
             else:
                 print("No new tag aliases suggested based on the current tag database.")
             
-            # After generating aliases, ask if user wants to continue or exit
-            continue_choice = input("\nAlias generation finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
-            if continue_choice == 'exit':
-                print("Exiting Tag Automator.")
+            if not _handle_continue_prompt(ui):
                 break  # Exit the main loop
         
         elif main_choice == '3':
-            files_to_clear = _get_files_from_user_choice(VAULT_PATH, "Choose scope for clearing tags:")
+            files_to_clear = _get_files_from_user_choice(VAULT_PATH, "Choose scope for clearing tags:", ui)
             if files_to_clear:
                 automator.clear_tags(files_to_clear)
             
-            continue_choice = input("\nTag clearing process finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
-            if continue_choice == 'exit':
-                print("Exiting Tag Automator.")
+            if not _handle_continue_prompt(ui):
                 break  # Exit the main loop
         
         elif main_choice == '4':
             print("\nTag Renaming/Refactoring Tool")
-            old_tag = input("Enter the tag to rename (old tag): ").strip().lower()
-            new_tag = input("Enter the new tag name: ").strip().lower()
+            old_tag = ui.get_user_choice("Enter the tag to rename (old tag):").strip().lower()
+            new_tag = ui.get_user_choice("Enter the new tag name:").strip().lower()
             
             if not old_tag or not new_tag:
                 print("Old tag and new tag cannot be empty. Returning to main menu.")
@@ -1751,15 +1898,13 @@ if __name__ == "__main__":
             else:
                 automator.rename_tag(old_tag, new_tag)
             
-            continue_choice = input("\nTag renaming process finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
-            if continue_choice == 'exit':
-                print("Exiting Tag Automator.")
+            if not _handle_continue_prompt(ui):
                 break  # Exit the main loop
         
         elif main_choice == '5':
             ui.display_title("Tag Merging Tool")
-            source_tag = ui.get_user_choice("Enter the tag to merge FROM (source tag): ").strip().lower()
-            target_tag = ui.get_user_choice("Enter the tag to merge INTO (target tag): ").strip().lower()
+            source_tag = ui.get_user_choice("Enter the tag to merge FROM (source tag):").strip().lower()
+            target_tag = ui.get_user_choice("Enter the tag to merge INTO (target tag):").strip().lower()
             
             if not source_tag or not target_tag:
                 print("Source tag and target tag cannot be empty. Returning to main menu.")
@@ -1768,9 +1913,7 @@ if __name__ == "__main__":
             else:
                 automator.merge_tags(source_tag, target_tag)
             
-            continue_choice = input("\nTag merging process finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
-            if continue_choice == 'exit':
-                print("Exiting Tag Automator.")
+            if not _handle_continue_prompt(ui):
                 break  # Exit the main loop
         
         elif main_choice == '6':
@@ -1778,12 +1921,12 @@ if __name__ == "__main__":
             print("Current AI Prompt (first 200 chars):")
             print(automator.get_ai_prompt()[:200] + "...")
             
-            new_prompt_choice = input("Do you want to set a new custom AI prompt? (yes/no): ").strip().lower()
+            new_prompt_choice = ui.get_user_choice("Do you want to set a new custom AI prompt? (yes/no):").strip().lower()
             if new_prompt_choice == 'yes':
                 print("Enter your new custom AI prompt. Type 'END_PROMPT' on a new line to finish.")
                 new_prompt_lines = []
                 while True:
-                    line = input()
+                    line = ui.get_user_choice("")
                     if line == 'END_PROMPT':
                         break
                     new_prompt_lines.append(line)
@@ -1793,9 +1936,7 @@ if __name__ == "__main__":
             else:
                 print("AI prompt not changed.")
             
-            continue_choice = input("\nAI prompt configuration finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
-            if continue_choice == 'exit':
-                print("Exiting Tag Automator.")
+            if not _handle_continue_prompt(ui):
                 break  # Exit the main loop
         
         elif main_choice == '7':
@@ -1806,32 +1947,34 @@ if __name__ == "__main__":
             print("4. Remove File/Directory from Exclusion List")
             print("5. View Current Exclusions")
             
-            exclusion_choice = input("Enter your choice (1-5): ").strip()
+            exclusion_choice = ui.get_user_choice("Enter your choice (1-5):").strip()
             
             if exclusion_choice == '1':
-                tag_to_add = input("Enter tag to add to exclusion list: ").strip().lower()
+                tag_to_add = ui.get_user_choice("Enter tag to add to exclusion list:").strip().lower()
                 automator.add_excluded_tag(tag_to_add)
             elif exclusion_choice == '2':
-                tag_to_remove = input("Enter tag to remove from exclusion list: ").strip().lower()
+                tag_to_remove = ui.get_user_choice("Enter tag to remove from exclusion list:").strip().lower()
                 automator.remove_excluded_tag(tag_to_remove)
             elif exclusion_choice == '3':
-                path_to_add = input("Enter file or directory path to add to exclusion list: ").strip()
+                path_to_add = ui.get_user_choice("Enter file or directory path to add to exclusion list:").strip()
                 automator.add_excluded_path(path_to_add)
             elif exclusion_choice == '4':
-                path_to_remove = input("Enter file or directory path to remove from exclusion list: ").strip()
+                path_to_remove = ui.get_user_choice("Enter file or directory path to remove from exclusion list:").strip()
                 automator.remove_excluded_path(path_to_remove)
             elif exclusion_choice == '5':
                 automator.view_exclusions()
             else:
                 print("Invalid choice. Returning to main menu.")
             
-            continue_choice = input("\nExclusion management finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
-            if continue_choice == 'exit':
-                print("Exiting Tag Automator.")
+            if not _handle_continue_prompt(ui):
                 break  # Exit the main loop
         
-        elif main_choice == '8':  # Interactive tag review
-            files_to_review = _get_files_from_user_choice(VAULT_PATH, "Interactive Tag Review and Approval")
+        elif main_choice == '8':  # Change Vault Path
+            if not change_vault_path(ui):
+                break  # Exit the application to apply the new vault path
+        
+        elif main_choice == '9':  # Interactive tag review
+            files_to_review = _get_files_from_user_choice(VAULT_PATH, "Interactive Tag Review and Approval", ui)
             if files_to_review:
                 for file_path in files_to_review:
                     if not file_path.exists() or not file_path.suffix.lower() == '.md':
@@ -1862,12 +2005,10 @@ if __name__ == "__main__":
                         
                         print(f"Tags updated for {file_path}: {parsed_front_matter['tags']}")
             
-            continue_choice = input("\nInteractive tag review finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
-            if continue_choice == 'exit':
-                print("Exiting Tag Automator.")
+            if not _handle_continue_prompt(ui):
                 break  # Exit the main loop
         
-        elif main_choice == '9':  # Interactive alias review
+        elif main_choice == '10':  # Interactive alias review
             print("\nInteractive Alias Review and Approval")
             automator._update_tag_database()  # Ensure tag database is fresh
             suggested_aliases = automator._generate_suggested_aliases()
@@ -1885,25 +2026,21 @@ if __name__ == "__main__":
             else:
                 print("No new tag aliases suggested based on the current tag database.")
             
-            continue_choice = input("\nInteractive alias review finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
-            if continue_choice == 'exit':
-                print("Exiting Tag Automator.")
+            if not _handle_continue_prompt(ui):
                 break  # Exit the main loop
         
-        elif main_choice == '10':  # Tag validation
+        elif main_choice == '11':  # Tag validation
             automator.validate_tags()
-            continue_choice = input("\nTag validation finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
-            if continue_choice == 'exit':
-                print("Exiting Tag Automator.")
+            if not _handle_continue_prompt(ui):
                 break  # Exit the main loop
         
-        elif main_choice == '11':  # Apply tag aliases to entire vault
+        elif main_choice == '12':  # Apply tag aliases to entire vault
             ui.display_title("Apply Tag Aliases to Entire Vault")
             ui.display_info("This will apply all defined tag aliases to every Markdown file in your vault.")
             ui.display_info("Tags that match an alias will be replaced with their canonical form.")
             
             # Ask if user wants a dry run first
-            dry_run = input("Run in dry-run mode first to see what would change? (yes/no, default: yes): ").strip().lower()
+            dry_run = ui.get_user_choice("Run in dry-run mode first to see what would change? (yes/no, default: yes):").strip().lower()
             if not dry_run:
                 dry_run = "yes"
             
@@ -1913,7 +2050,7 @@ if __name__ == "__main__":
                 
                 if stats["tags_replaced"] > 0:
                     # Ask if user wants to proceed with actual changes
-                    proceed = input("\nDo you want to apply these changes for real? (yes/no): ").strip().lower()
+                    proceed = ui.get_user_choice("\nDo you want to apply these changes for real? (yes/no):").strip().lower()
                     if proceed == "yes":
                         print("\nApplying tag aliases to vault...")
                         stats = automator.apply_aliases_to_vault(dry_run=False)
@@ -1925,14 +2062,12 @@ if __name__ == "__main__":
                 print("\nApplying tag aliases to vault...")
                 stats = automator.apply_aliases_to_vault(dry_run=False)
             
-            continue_choice = input("\nTag alias application finished. Do you want to return to the main menu or exit? (menu/exit): ").strip().lower()
-            if continue_choice == 'exit':
-                print("Exiting Tag Automator.")
+            if not _handle_continue_prompt(ui):
                 break  # Exit the main loop
-
-        elif main_choice == '12':  # Exit option moved to 12
+        
+        elif main_choice == '13':  # Exit
             print("Exiting Tag Automator.")
             break  # Exit the main loop
         
         else:
-            print("Invalid choice. Please enter 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, or 12.")
+            print("Invalid choice. Please enter a number between 1 and 13.")
