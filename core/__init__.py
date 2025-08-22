@@ -1,1 +1,1 @@
-# This makes core a Python package
+# Core module for Obsidian Tag Automator
