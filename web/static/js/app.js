@@ -148,6 +148,36 @@ class ObsidianTagAutomatorApp {
             this.updateStatusPanel(status);
             this.updateDashboardStats(status.stats);
             this.updateRecentActivity(files);
+
+            // Store vault path and AI status for dashboard display
+            this.currentVaultPath = status.vault_path;
+            this.aiOnline = status.ai_status;
+
+            // Add vault path indicator to dashboard
+            const dashboardOverview = document.querySelector('#dashboard-view .grid.grid-cols-1.lg:grid-cols-2.gap-6.mb-6');
+            if (dashboardOverview && !document.getElementById('dashboard-vault-info')) {
+                const vaultInfoHtml = `
+                    <div id="dashboard-vault-info" class="glass-effect rounded-xl p-4 mb-6">
+                        <div class="flex justify-between items-center">
+                            <div>
+                                <h3 class="text-lg font-semibold text-blue-300 mb-1">Vault Information</h3>
+                                <div class="text-sm text-gray-300">
+                                    <i class="fas fa-folder mr-2"></i>
+                                    <span id="dashboard-vault-path" class="font-mono">Loading...</span>
+                                </div>
+                            </div>
+                            <div class="text-right">
+                                <div class="text-sm text-gray-400">AI Status</div>
+                                <div id="dashboard-ai-status" class="flex items-center justify-end">
+                                    <div class="loading-spinner mr-2"></div>
+                                    <span class="text-yellow-400">Checking...</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                dashboardOverview.insertAdjacentHTML('afterbegin', vaultInfoHtml);
+            }
         } catch (error) {
             console.error('Failed to load dashboard:', error);
         }
@@ -182,6 +212,22 @@ class ObsidianTagAutomatorApp {
         document.getElementById('dashboard-total-files').textContent = stats.total_files || '-';
         document.getElementById('dashboard-tagged-files').textContent = stats.tagged_files || '-';
         document.getElementById('dashboard-unique-tags').textContent = stats.total_tags || '-';
+
+        // Update vault path and AI status
+        document.getElementById('dashboard-vault-path').textContent = this.currentVaultPath || 'Unknown';
+        
+        const aiStatus = document.getElementById('dashboard-ai-status');
+        if (this.aiOnline) {
+            aiStatus.innerHTML = `
+                <span class="w-2 h-2 bg-green-500 rounded-full mr-2 pulse-animation"></span>
+                <span class="text-green-400">Online</span>
+            `;
+        } else {
+            aiStatus.innerHTML = `
+                <span class="w-2 h-2 bg-red-500 rounded-full mr-2"></span>
+                <span class="text-red-400">Offline</span>
+            `;
+        }
 
         // Update trends (placeholder logic)
         const totalTrend = document.getElementById('total-files-trend');
@@ -749,29 +795,57 @@ class ObsidianTagAutomatorApp {
         container.innerHTML = `
             <div class="glass-effect rounded-xl p-6 fade-in">
                 <h2 class="text-2xl font-bold mb-6 text-blue-300">Settings</h2>
-                
+            
                 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <!-- Vault Configuration Section -->
+                    <div class="bg-slate-800/30 rounded-lg p-6">
+                        <h3 class="text-lg font-semibold mb-4 text-blue-400">Vault Configuration</h3>
+                    
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">Current Vault Path</label>
+                                <div class="bg-slate-700 rounded-lg p-3 mb-3 flex justify-between items-center">
+                                    <span id="current-vault-path" class="text-sm font-mono text-green-400 break-all">Loading...</span>
+                                    <button id="copy-vault-path" class="ml-2 text-blue-400 hover:text-blue-300" title="Copy to clipboard">
+                                        <i class="far fa-copy"></i>
+                                    </button>
+                                </div>
+                                <div class="text-xs text-gray-400 mb-3">
+                                    <i class="fas fa-info-circle mr-1"></i>
+                                    The vault path is where your Obsidian notes are stored.
+                                    To change it, restart the application with the --vault-path argument.
+                                </div>
+                                <div class="bg-blue-900/20 border border-blue-700/30 rounded-lg p-3 mb-3">
+                                    <div class="text-sm text-blue-300 font-medium mb-1">How to change vault path:</div>
+                                    <div class="text-xs text-blue-200 font-mono">
+                                        python tag_automator_cli.py --web --vault-path "/path/to/your/vault"
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                
                     <div class="bg-slate-800/30 rounded-lg p-6">
                         <h3 class="text-lg font-semibold mb-4 text-cyan-400">AI Configuration</h3>
-                        
+                    
                         <div class="space-y-4">
                             <div>
                                 <label class="block text-sm font-medium text-gray-300 mb-2">AI Prompt</label>
-                                <textarea id="ai-prompt" rows="8" 
+                                <textarea id="ai-prompt" rows="8"
                                           class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white font-mono text-sm"
                                           placeholder="Enter AI prompt..."></textarea>
                             </div>
-                            
-                            <button onclick="app.updateAIPrompt()" 
+                        
+                            <button onclick="app.updateAIPrompt()"
                                     class="w-full bg-cyan-600 hover:bg-cyan-700 text-white py-2 px-4 rounded-lg transition-colors duration-300">
                                 <i class="fas fa-save mr-2"></i> Update AI Prompt
                             </button>
                         </div>
                     </div>
-                    
+                
                     <div class="bg-slate-800/30 rounded-lg p-6">
                         <h3 class="text-lg font-semibold mb-4 text-orange-400">Exclusions</h3>
-                        
+                    
                         <div class="space-y-4">
                             <div>
                                 <label class="block text-sm font-medium text-gray-300 mb-2">Excluded Tags</label>
@@ -779,24 +853,24 @@ class ObsidianTagAutomatorApp {
                                     <!-- Tags will be loaded here -->
                                 </div>
                                 <div class="flex mt-2 space-x-2">
-                                    <input type="text" id="new-excluded-tag" placeholder="Add tag to exclude" 
+                                    <input type="text" id="new-excluded-tag" placeholder="Add tag to exclude"
                                            class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm">
-                                    <button onclick="app.addExcludedTag()" 
+                                    <button onclick="app.addExcludedTag()"
                                             class="bg-orange-600 hover:bg-orange-700 text-white py-2 px-4 rounded-lg transition-colors duration-300">
                                         Add
                                     </button>
                                 </div>
                             </div>
-                            
+                        
                             <div>
                                 <label class="block text-sm font-medium text-gray-300 mb-2">Excluded Paths</label>
                                 <div id="excluded-paths" class="bg-slate-700 rounded-lg p-3 min-h-[100px] max-h-32 overflow-y-auto">
                                     <!-- Paths will be loaded here -->
                                 </div>
                                 <div class="flex mt-2 space-x-2">
-                                    <input type="text" id="new-excluded-path" placeholder="Add path to exclude" 
+                                    <input type="text" id="new-excluded-path" placeholder="Add path to exclude"
                                            class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm">
-                                    <button onclick="app.addExcludedPath()" 
+                                    <button onclick="app.addExcludedPath()"
                                             class="bg-orange-600 hover:bg-orange-700 text-white py-2 px-4 rounded-lg transition-colors duration-300">
                                         Add
                                     </button>
@@ -805,25 +879,48 @@ class ObsidianTagAutomatorApp {
                         </div>
                     </div>
                 </div>
-                
+            
                 <div class="mt-6">
-                    <button onclick="app.updateTagDatabase()" 
+                    <button onclick="app.updateTagDatabase()"
                             class="bg-green-600 hover:bg-green-700 text-white py-3 px-6 rounded-lg transition-colors duration-300">
                         <i class="fas fa-database mr-2"></i> Update Tag Database
                     </button>
                 </div>
             </div>
         `;
-        
+    
         this.loadSettings();
     }
 
     async loadSettings() {
         try {
-            const [config, prompt] = await Promise.all([
+            const [status, config, prompt] = await Promise.all([
+                this.apiGet('/status'),
                 this.apiGet('/config'),
                 this.apiGet('/ai-prompt')
             ]);
+
+            // Load vault path
+            const vaultPathElement = document.getElementById('current-vault-path');
+            if (vaultPathElement) {
+                // Set the vault path text
+                vaultPathElement.textContent = status.vault_path || 'Not set';
+                
+                // Set up the copy button that was already added in the HTML
+                const copyButton = document.getElementById('copy-vault-path');
+                if (copyButton) {
+                    copyButton.onclick = () => {
+                        navigator.clipboard.writeText(status.vault_path || '');
+                        this.showNotification('success', 'Copied!', 'Vault path copied to clipboard');
+                    };
+                }
+                
+                // Also update the vault path in the dashboard if it exists
+                const dashboardVaultPath = document.getElementById('dashboard-vault-path');
+                if (dashboardVaultPath) {
+                    dashboardVaultPath.textContent = status.vault_path || 'Not set';
+                }
+            }
 
             // Load AI prompt
             document.getElementById('ai-prompt').value = prompt.prompt;
