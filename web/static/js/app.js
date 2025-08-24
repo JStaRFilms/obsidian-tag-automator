@@ -4,13 +4,25 @@ class ObsidianTagAutomatorApp {
         this.currentView = 'dashboard';
         this.currentTask = null;
         this.pollingInterval = null;
+        this.cache = new Map();
+        this.cacheTTL = 30000; // 30 seconds
+        this.performanceMetrics = {
+            apiCalls: [],
+            loadTimes: {},
+            errorCount: 0
+        };
         this.init();
     }
 
     init() {
+        const startTime = performance.now();
         this.setupEventListeners();
         this.loadDashboard();
         this.startStatusPolling();
+        this.performanceMetrics.loadTimes.initialization = performance.now() - startTime;
+        
+        // Add performance indicator to the UI
+        this.addPerformanceIndicator();
     }
 
     setupEventListeners() {
@@ -48,8 +60,9 @@ class ObsidianTagAutomatorApp {
         });
     }
 
-    // API Helper Methods
+    // API Helper Methods with Caching
     async apiCall(endpoint, options = {}) {
+        const startTime = performance.now();
         const defaultOptions = {
             headers: {
                 'Content-Type': 'application/json',
@@ -57,17 +70,66 @@ class ObsidianTagAutomatorApp {
         };
 
         const config = { ...defaultOptions, ...options };
+        const cacheKey = `${endpoint}_${JSON.stringify(config)}`;
+        
+        // Check cache for GET requests
+        if (!config.method || config.method === 'GET') {
+            const cached = this.cache.get(cacheKey);
+            if (cached && Date.now() - cached.timestamp < this.cacheTTL) {
+                // Record cache hit
+                this.performanceMetrics.apiCalls.push({
+                    endpoint,
+                    duration: performance.now() - startTime,
+                    cached: true,
+                    timestamp: Date.now()
+                });
+                return cached.data;
+            }
+        }
 
         try {
             const response = await fetch(`/api${endpoint}`, config);
             const data = await response.json();
+            
+            const duration = performance.now() - startTime;
+            
+            // Record API call metrics
+            this.performanceMetrics.apiCalls.push({
+                endpoint,
+                duration,
+                status: response.status,
+                cached: false,
+                timestamp: Date.now()
+            });
+            
+            // Update performance indicator
+            this.updatePerformanceIndicator();
 
             if (!response.ok) {
+                this.performanceMetrics.errorCount++;
                 throw new Error(data.error || `HTTP error! status: ${response.status}`);
+            }
+
+            // Cache successful GET responses
+            if (!config.method || config.method === 'GET') {
+                this.cache.set(cacheKey, {
+                    data: data,
+                    timestamp: Date.now()
+                });
             }
 
             return data;
         } catch (error) {
+            const duration = performance.now() - startTime;
+            this.performanceMetrics.apiCalls.push({
+                endpoint,
+                duration,
+                error: error.message,
+                cached: false,
+                timestamp: Date.now()
+            });
+            this.performanceMetrics.errorCount++;
+            
             console.error('API call failed:', error);
             this.showNotification('error', 'API Error', error.message);
             throw error;
@@ -139,94 +201,482 @@ class ObsidianTagAutomatorApp {
     // Dashboard View
     async loadDashboard() {
         try {
-            const [status, files, tags] = await Promise.all([
-                this.apiGet('/status'),
-                this.apiGet('/files'),
-                this.apiGet('/tags')
+            // Show skeleton loaders immediately
+            this.showSkeletonLoaders();
+            
+            // Step 1: Load quick status first for immediate feedback
+            try {
+                const quickStatus = await this.apiGet('/status/quick');
+                this.updateBasicStatus(quickStatus);
+            } catch (error) {
+                console.warn('Quick status failed, continuing with full load:', error);
+            }
+            
+            // Step 2: Load detailed data in parallel
+            const [statusPromise, filesPromise] = [
+                this.apiGet('/status').catch(error => ({ 
+                    success: false, 
+                    error: error.message,
+                    fallback: true 
+                })),
+                this.apiGet('/files').catch(error => ({ 
+                    success: false, 
+                    error: error.message,
+                    fallback: true 
+                }))
+            ];
+            
+            // Wait for both with timeout
+            const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Request timeout')), 10000)
+            );
+            
+            const [status, files] = await Promise.race([
+                Promise.all([statusPromise, filesPromise]),
+                timeoutPromise
             ]);
 
-            this.updateStatusPanel(status);
-            this.updateDashboardStats(status.stats);
-            this.updateRecentActivity(files);
-
-            // Store vault path and AI status for dashboard display
-            this.currentVaultPath = status.vault_path;
-            this.aiOnline = status.ai_status;
-
-            // Add vault path indicator to dashboard
-            const dashboardOverview = document.querySelector('#dashboard-view .grid.grid-cols-1.lg:grid-cols-2.gap-6.mb-6');
-            if (dashboardOverview && !document.getElementById('dashboard-vault-info')) {
-                const vaultInfoHtml = `
-                    <div id="dashboard-vault-info" class="glass-effect rounded-xl p-4 mb-6">
-                        <div class="flex justify-between items-center">
-                            <div>
-                                <h3 class="text-lg font-semibold text-blue-300 mb-1">Vault Information</h3>
-                                <div class="text-sm text-gray-300">
-                                    <i class="fas fa-folder mr-2"></i>
-                                    <span id="dashboard-vault-path" class="font-mono">Loading...</span>
-                                </div>
-                            </div>
-                            <div class="text-right">
-                                <div class="text-sm text-gray-400">AI Status</div>
-                                <div id="dashboard-ai-status" class="flex items-center justify-end">
-                                    <div class="loading-spinner mr-2"></div>
-                                    <span class="text-yellow-400">Checking...</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                `;
-                dashboardOverview.insertAdjacentHTML('afterbegin', vaultInfoHtml);
+            // Handle status data
+            if (status.success && !status.fallback) {
+                this.updateStatusPanel(status);
+                this.updateDashboardStats(status.stats);
+                this.currentVaultPath = status.vault_path;
+                this.aiOnline = status.ai_status;
+            } else if (status.fallback) {
+                console.error('Failed to load detailed status:', status.error);
+                this.showLoadingError('status');
             }
+
+            // Handle files data - use progressive loading
+            if (files.success && !files.fallback) {
+                this.updateRecentActivity(files);
+            } else {
+                // Try progressive loading as fallback
+                console.warn('Using progressive loading for files');
+                this.loadRecentActivityProgressive();
+            }
+
+            // Hide skeleton loaders
+            this.hideSkeletonLoaders();
+
         } catch (error) {
             console.error('Failed to load dashboard:', error);
+            this.hideSkeletonLoaders();
+            this.showLoadingError('dashboard');
+        }
+    }
+    
+    updateBasicStatus(quickStatus) {
+        if (!quickStatus.success) return;
+        
+        // Update basic vault path immediately
+        const vaultPathText = document.getElementById('vault-path-text') || document.getElementById('vault-path');
+        if (vaultPathText) {
+            vaultPathText.textContent = quickStatus.vault_path;
+            vaultPathText.style.color = quickStatus.vault_exists ? '#10b981' : '#ef4444';
+        }
+        
+        // Update AI status immediately
+        const aiStatusContent = document.getElementById('ai-status-content') || document.getElementById('ai-status');
+        if (aiStatusContent) {
+            if (quickStatus.ai_status) {
+                aiStatusContent.innerHTML = `
+                    <span class="w-2 h-2 bg-green-500 rounded-full mr-2 pulse-animation"></span>
+                    <span class="text-green-400">Online</span>
+                `;
+            } else {
+                aiStatusContent.innerHTML = `
+                    <span class="w-2 h-2 bg-red-500 rounded-full mr-2"></span>
+                    <span class="text-red-400">Offline</span>
+                `;
+            }
+        }
+        
+        // Show vault status in Recent Activity immediately
+        const tbody = document.getElementById('recent-activity');
+        if (tbody && !quickStatus.vault_exists) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="4" class="py-8 text-center text-red-400">
+                        <i class="fas fa-exclamation-triangle mr-2"></i> Vault path does not exist
+                        <div class="text-sm mt-2 text-gray-400">Path: ${quickStatus.vault_path}</div>
+                        <div class="text-sm mt-1 text-blue-400">
+                            <i class="fas fa-info-circle mr-1"></i>
+                            Please check the vault path in settings
+                        </div>
+                    </td>
+                </tr>
+            `;
+        } else if (tbody && !quickStatus.is_obsidian_vault) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="4" class="py-8 text-center text-yellow-400">
+                        <i class="fas fa-exclamation-triangle mr-2"></i> Not an Obsidian vault
+                        <div class="text-sm mt-2 text-gray-400">Path: ${quickStatus.vault_path}</div>
+                        <div class="text-sm mt-1 text-blue-400">
+                            <i class="fas fa-info-circle mr-1"></i>
+                            Directory exists but no .obsidian folder found
+                        </div>
+                    </td>
+                </tr>
+            `;
+        }
+    }
+    
+    async loadRecentActivityProgressive() {
+        try {
+            const tbody = document.getElementById('recent-activity');
+            
+            // Show loading state
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="4" class="py-4 text-center text-gray-400">
+                        <i class="fas fa-spinner fa-spin mr-2"></i> Loading files progressively...
+                    </td>
+                </tr>
+            `;
+            
+            // Load first batch of recent files
+            const recentFiles = await this.apiGet('/files/recent?limit=10&offset=0&sort=modified');
+            
+            if (recentFiles.success && recentFiles.files.length > 0) {
+                this.updateRecentActivity(recentFiles);
+                
+                // If there are more files, show a "Load More" option
+                if (recentFiles.pagination.has_more) {
+                    const loadMoreRow = document.createElement('tr');
+                    loadMoreRow.innerHTML = `
+                        <td colspan="4" class="py-3 text-center">
+                            <button onclick="app.loadMoreRecentFiles(10)" 
+                                    class="text-blue-400 hover:text-blue-300 text-sm transition-colors">
+                                <i class="fas fa-chevron-down mr-2"></i>
+                                Load ${Math.min(10, recentFiles.pagination.total - 10)} more files
+                            </button>
+                        </td>
+                    `;
+                    tbody.appendChild(loadMoreRow);
+                }
+            } else {
+                this.showLoadingError('files');
+            }
+        } catch (error) {
+            console.error('Progressive loading failed:', error);
+            this.showLoadingError('files');
+        }
+    }
+    
+    async loadMoreRecentFiles(offset) {
+        try {
+            const tbody = document.getElementById('recent-activity');
+            const loadMoreRow = tbody.querySelector('tr:last-child');
+            
+            // Show loading in the load more button
+            if (loadMoreRow) {
+                loadMoreRow.innerHTML = `
+                    <td colspan="4" class="py-3 text-center text-gray-400">
+                        <i class="fas fa-spinner fa-spin mr-2"></i> Loading more files...
+                    </td>
+                `;
+            }
+            
+            const moreFiles = await this.apiGet(`/files/recent?limit=10&offset=${offset}&sort=modified`);
+            
+            if (moreFiles.success && moreFiles.files.length > 0) {
+                // Remove loading row
+                if (loadMoreRow) {
+                    loadMoreRow.remove();
+                }
+                
+                // Add new files
+                moreFiles.files.forEach(file => {
+                    const row = document.createElement('tr');
+                    row.className = 'border-b border-slate-700/30 hover:bg-slate-700/20 transition-colors';
+                    row.innerHTML = `
+                        <td class="py-3 px-4 text-sm terminal-font text-blue-300" title="${file.full_path}">
+                            ${file.name}
+                            <div class="text-xs text-gray-500 mt-1">${file.path}</div>
+                        </td>
+                        <td class="py-3 px-4 text-sm">
+                            <span class="bg-blue-900/50 text-blue-400 py-1 px-2 rounded-full text-xs">
+                                <i class="fas fa-file-alt mr-1"></i>Indexed
+                            </span>
+                        </td>
+                        <td class="py-3 px-4 text-sm">
+                            <span class="text-gray-400">
+                                <i class="fas fa-clock mr-1"></i>Not processed
+                            </span>
+                        </td>
+                        <td class="py-3 px-4 text-sm text-gray-400">
+                            ${this.formatDate(file.modified)}
+                            <div class="text-xs text-gray-500 mt-1">${this.formatFileSize(file.size)}</div>
+                        </td>
+                    `;
+                    tbody.appendChild(row);
+                });
+                
+                // Add new load more button if there are more files
+                if (moreFiles.pagination.has_more) {
+                    const newLoadMoreRow = document.createElement('tr');
+                    newLoadMoreRow.innerHTML = `
+                        <td colspan="4" class="py-3 text-center">
+                            <button onclick="app.loadMoreRecentFiles(${offset + 10})" 
+                                    class="text-blue-400 hover:text-blue-300 text-sm transition-colors">
+                                <i class="fas fa-chevron-down mr-2"></i>
+                                Load ${Math.min(10, moreFiles.pagination.total - offset - 10)} more files
+                            </button>
+                        </td>
+                    `;
+                    tbody.appendChild(newLoadMoreRow);
+                }
+            } else {
+                // No more files, remove the load more row
+                if (loadMoreRow) {
+                    loadMoreRow.remove();
+                }
+            }
+        } catch (error) {
+            console.error('Failed to load more files:', error);
+            this.showNotification('error', 'Load Error', 'Failed to load more files');
+        }
+    }
+
+    addPerformanceIndicator() {
+        // Add performance indicator to the status panel
+        const statusPanel = document.getElementById('status-panel');
+        if (statusPanel) {
+            const perfIndicator = document.createElement('div');
+            perfIndicator.className = 'flex justify-between items-center mt-3 pt-3 border-t border-slate-600';
+            perfIndicator.innerHTML = `
+                <span class="text-gray-400 text-xs">Performance:</span>
+                <span class="text-xs" id="performance-indicator">
+                    <span class="text-green-400">●</span> Good
+                </span>
+            `;
+            statusPanel.appendChild(perfIndicator);
+        }
+    }
+    
+    updatePerformanceIndicator() {
+        const indicator = document.getElementById('performance-indicator');
+        if (!indicator) return;
+        
+        const recentCalls = this.performanceMetrics.apiCalls.slice(-10);
+        const avgResponseTime = recentCalls.length > 0 
+            ? recentCalls.reduce((sum, call) => sum + call.duration, 0) / recentCalls.length 
+            : 0;
+        
+        const cacheHitRate = recentCalls.length > 0
+            ? (recentCalls.filter(call => call.cached).length / recentCalls.length) * 100
+            : 0;
+        
+        let status, color;
+        if (avgResponseTime < 200) {
+            status = 'Excellent';
+            color = 'text-green-400';
+        } else if (avgResponseTime < 500) {
+            status = 'Good';
+            color = 'text-blue-400';
+        } else if (avgResponseTime < 1000) {
+            status = 'Fair';
+            color = 'text-yellow-400';
+        } else {
+            status = 'Slow';
+            color = 'text-red-400';
+        }
+        
+        indicator.innerHTML = `
+            <span class="${color}">●</span> ${status}
+            <span class="text-gray-500 ml-1" title="Avg: ${Math.round(avgResponseTime)}ms, Cache: ${Math.round(cacheHitRate)}%">
+                ${Math.round(avgResponseTime)}ms
+            </span>
+        `;
+    }
+    
+    getPerformanceReport() {
+        const metrics = this.performanceMetrics;
+        const recentCalls = metrics.apiCalls.slice(-50);
+        
+        return {
+            totalApiCalls: metrics.apiCalls.length,
+            averageResponseTime: recentCalls.length > 0 
+                ? recentCalls.reduce((sum, call) => sum + call.duration, 0) / recentCalls.length 
+                : 0,
+            cacheHitRate: recentCalls.length > 0
+                ? (recentCalls.filter(call => call.cached).length / recentCalls.length) * 100
+                : 0,
+            errorRate: metrics.errorCount / Math.max(metrics.apiCalls.length, 1) * 100,
+            initializationTime: metrics.loadTimes.initialization || 0,
+            slowestEndpoint: recentCalls.reduce((slowest, call) => 
+                !call.cached && call.duration > (slowest?.duration || 0) ? call : slowest
+            , null)
+        };
+    }
+    
+    showSkeletonLoaders() {
+        // Status panel skeletons
+        const statusElements = [
+            'vault-path-skeleton',
+            'ai-status-skeleton', 
+            'total-files-skeleton',
+            'tagged-files-skeleton',
+            'unique-tags-skeleton'
+        ];
+        
+        statusElements.forEach(id => {
+            const skeleton = document.getElementById(id);
+            const textElement = document.getElementById(id.replace('-skeleton', '-text') || id.replace('-skeleton', ''));
+            if (skeleton && textElement) {
+                skeleton.classList.remove('hidden');
+                textElement.classList.add('hidden');
+            }
+        });
+
+        // Dashboard stats skeletons
+        const dashboardSkeletons = [
+            'dashboard-total-files-skeleton',
+            'dashboard-tagged-files-skeleton', 
+            'dashboard-unique-tags-skeleton'
+        ];
+        
+        dashboardSkeletons.forEach(id => {
+            const skeleton = document.getElementById(id);
+            const textElement = document.getElementById(id.replace('-skeleton', ''));
+            if (skeleton && textElement) {
+                skeleton.classList.remove('hidden');
+                textElement.classList.add('hidden');
+            }
+        });
+
+        // Recent Activity skeleton
+        const loadingRow = document.getElementById('recent-activity-loading');
+        const skeletonRows = document.querySelectorAll('.skeleton-row');
+        if (loadingRow) loadingRow.classList.add('hidden');
+        skeletonRows.forEach(row => row.classList.remove('hidden'));
+    }
+
+    hideSkeletonLoaders() {
+        // Status panel skeletons
+        const statusElements = [
+            'vault-path-skeleton',
+            'ai-status-skeleton',
+            'total-files-skeleton', 
+            'tagged-files-skeleton',
+            'unique-tags-skeleton'
+        ];
+        
+        statusElements.forEach(id => {
+            const skeleton = document.getElementById(id);
+            const textElement = document.getElementById(id.replace('-skeleton', '-text') || id.replace('-skeleton', ''));
+            if (skeleton && textElement) {
+                skeleton.classList.add('hidden');
+                textElement.classList.remove('hidden');
+            }
+        });
+
+        // Dashboard stats skeletons
+        const dashboardSkeletons = [
+            'dashboard-total-files-skeleton',
+            'dashboard-tagged-files-skeleton',
+            'dashboard-unique-tags-skeleton'
+        ];
+        
+        dashboardSkeletons.forEach(id => {
+            const skeleton = document.getElementById(id);
+            const textElement = document.getElementById(id.replace('-skeleton', ''));
+            if (skeleton && textElement) {
+                skeleton.classList.add('hidden');
+                textElement.classList.remove('hidden');
+            }
+        });
+
+        // Recent Activity skeleton
+        const skeletonRows = document.querySelectorAll('.skeleton-row');
+        skeletonRows.forEach(row => row.classList.add('hidden'));
+    }
+
+    showLoadingError(component) {
+        switch(component) {
+            case 'status':
+                this.showNotification('error', 'Loading Error', 'Failed to load vault status');
+                break;
+            case 'files':
+                document.getElementById('recent-activity').innerHTML = `
+                    <tr><td colspan="4" class="py-8 text-center text-red-400">
+                        <i class="fas fa-exclamation-triangle mr-2"></i> Failed to load recent activity
+                    </td></tr>
+                `;
+                break;
+            case 'dashboard':
+                this.showNotification('error', 'Dashboard Error', 'Failed to load dashboard data');
+                break;
         }
     }
 
     updateStatusPanel(status) {
-        document.getElementById('vault-path').textContent = status.vault_path;
+        // Update vault path
+        const vaultPathText = document.getElementById('vault-path-text') || document.getElementById('vault-path');
+        if (vaultPathText) {
+            vaultPathText.textContent = status.vault_path;
+        }
         
-        const aiStatus = document.getElementById('ai-status');
-        if (status.ai_status) {
-            aiStatus.innerHTML = `
-                <span class="w-2 h-2 bg-green-500 rounded-full mr-2 pulse-animation"></span>
-                <span class="text-green-400">Online</span>
-            `;
-        } else {
-            aiStatus.innerHTML = `
-                <span class="w-2 h-2 bg-red-500 rounded-full mr-2"></span>
-                <span class="text-red-400">Offline</span>
-            `;
+        // Update AI status
+        const aiStatusContent = document.getElementById('ai-status-content') || document.getElementById('ai-status');
+        if (aiStatusContent) {
+            if (status.ai_status) {
+                aiStatusContent.innerHTML = `
+                    <span class="w-2 h-2 bg-green-500 rounded-full mr-2 pulse-animation"></span>
+                    <span class="text-green-400">Online</span>
+                `;
+            } else {
+                aiStatusContent.innerHTML = `
+                    <span class="w-2 h-2 bg-red-500 rounded-full mr-2"></span>
+                    <span class="text-red-400">Offline</span>
+                `;
+            }
         }
 
         if (status.stats) {
-            document.getElementById('total-files').textContent = status.stats.total_files || '-';
-            document.getElementById('tagged-files').textContent = status.stats.tagged_files || '-';
-            document.getElementById('unique-tags').textContent = status.stats.total_tags || '-';
+            // Update sidebar stats
+            const totalFilesText = document.getElementById('total-files-text') || document.getElementById('total-files');
+            const taggedFilesText = document.getElementById('tagged-files-text') || document.getElementById('tagged-files');
+            const uniqueTagsText = document.getElementById('unique-tags-text') || document.getElementById('unique-tags');
+            
+            if (totalFilesText) totalFilesText.textContent = status.stats.total_files || '-';
+            if (taggedFilesText) taggedFilesText.textContent = status.stats.tagged_files || '-';
+            if (uniqueTagsText) uniqueTagsText.textContent = status.stats.total_tags || '-';
         }
     }
 
     updateDashboardStats(stats) {
         if (!stats) return;
 
-        document.getElementById('dashboard-total-files').textContent = stats.total_files || '-';
-        document.getElementById('dashboard-tagged-files').textContent = stats.tagged_files || '-';
-        document.getElementById('dashboard-unique-tags').textContent = stats.total_tags || '-';
-
-        // Update vault path and AI status
-        document.getElementById('dashboard-vault-path').textContent = this.currentVaultPath || 'Unknown';
+        const totalFilesEl = document.getElementById('dashboard-total-files');
+        const taggedFilesEl = document.getElementById('dashboard-tagged-files');
+        const uniqueTagsEl = document.getElementById('dashboard-unique-tags');
         
-        const aiStatus = document.getElementById('dashboard-ai-status');
-        if (this.aiOnline) {
-            aiStatus.innerHTML = `
-                <span class="w-2 h-2 bg-green-500 rounded-full mr-2 pulse-animation"></span>
-                <span class="text-green-400">Online</span>
-            `;
-        } else {
-            aiStatus.innerHTML = `
-                <span class="w-2 h-2 bg-red-500 rounded-full mr-2"></span>
-                <span class="text-red-400">Offline</span>
-            `;
+        if (totalFilesEl) totalFilesEl.textContent = stats.total_files || '-';
+        if (taggedFilesEl) taggedFilesEl.textContent = stats.tagged_files || '-';
+        if (uniqueTagsEl) uniqueTagsEl.textContent = stats.total_tags || '-';
+
+        // Update vault path and AI status in dashboard if elements exist
+        const dashboardVaultPath = document.getElementById('dashboard-vault-path');
+        if (dashboardVaultPath) {
+            dashboardVaultPath.textContent = this.currentVaultPath || 'Unknown';
+        }
+        
+        const dashboardAiStatus = document.getElementById('dashboard-ai-status');
+        if (dashboardAiStatus) {
+            if (this.aiOnline) {
+                dashboardAiStatus.innerHTML = `
+                    <span class="w-2 h-2 bg-green-500 rounded-full mr-2 pulse-animation"></span>
+                    <span class="text-green-400">Online</span>
+                `;
+            } else {
+                dashboardAiStatus.innerHTML = `
+                    <span class="w-2 h-2 bg-red-500 rounded-full mr-2"></span>
+                    <span class="text-red-400">Offline</span>
+                `;
+            }
         }
 
         // Update trends (placeholder logic)
@@ -234,19 +684,37 @@ class ObsidianTagAutomatorApp {
         const taggedTrend = document.getElementById('tagged-files-trend');
         const uniqueTrend = document.getElementById('unique-tags-trend');
 
-        totalTrend.innerHTML = '<i class="fas fa-minus mr-1"></i> No data';
-        taggedTrend.innerHTML = '<i class="fas fa-minus mr-1"></i> No data';
-        uniqueTrend.innerHTML = '<i class="fas fa-minus mr-1"></i> No data';
+        if (totalTrend) totalTrend.innerHTML = '<i class="fas fa-minus mr-1"></i> No data';
+        if (taggedTrend) taggedTrend.innerHTML = '<i class="fas fa-minus mr-1"></i> No data';
+        if (uniqueTrend) uniqueTrend.innerHTML = '<i class="fas fa-minus mr-1"></i> No data';
     }
 
     updateRecentActivity(files) {
         const tbody = document.getElementById('recent-activity');
         
         if (!files || !files.files || files.files.length === 0) {
+            // Provide detailed diagnostic information
+            let diagnosticInfo = '';
+            if (files && files.vault_path) {
+                diagnosticInfo = `
+                    <div class="text-sm mt-2 space-y-1">
+                        <div><strong>Vault Path:</strong> ${files.vault_path}</div>
+                        <div><strong>Is Obsidian Vault:</strong> ${files.is_obsidian_vault ? 'Yes' : 'No'}</div>
+                        <div><strong>Total Files Found:</strong> ${files.total_files || 0}</div>
+                        ${files.scan_summary ? `<div><strong>Directories Scanned:</strong> ${files.scan_summary.total_directories}</div>` : ''}
+                    </div>
+                `;
+            }
+            
             tbody.innerHTML = `
                 <tr>
                     <td colspan="4" class="py-8 text-center text-gray-400">
-                        No files found in vault
+                        <i class="fas fa-folder-open mr-2"></i> No markdown files found in vault
+                        ${diagnosticInfo}
+                        <div class="text-sm mt-4 text-blue-400">
+                            <i class="fas fa-info-circle mr-1"></i>
+                            Check that the vault path points to a directory containing .md files
+                        </div>
                     </td>
                 </tr>
             `;
@@ -259,17 +727,49 @@ class ObsidianTagAutomatorApp {
             .slice(0, 10);
 
         tbody.innerHTML = recentFiles.map(file => `
-            <tr class="border-b border-slate-700/30 hover:bg-slate-700/20">
-                <td class="py-3 px-4 text-sm terminal-font text-blue-300">${file.name}</td>
-                <td class="py-3 px-4 text-sm">
-                    <span class="bg-blue-900/50 text-blue-400 py-1 px-2 rounded-full text-xs">Indexed</span>
+            <tr class="border-b border-slate-700/30 hover:bg-slate-700/20 transition-colors">
+                <td class="py-3 px-4 text-sm terminal-font text-blue-300" title="${file.full_path}">
+                    ${file.name}
+                    <div class="text-xs text-gray-500 mt-1">${file.path}</div>
                 </td>
                 <td class="py-3 px-4 text-sm">
-                    <span class="text-gray-400">Not processed</span>
+                    <span class="bg-blue-900/50 text-blue-400 py-1 px-2 rounded-full text-xs">
+                        <i class="fas fa-file-alt mr-1"></i>Indexed
+                    </span>
                 </td>
-                <td class="py-3 px-4 text-sm text-gray-400">${this.formatDate(file.modified)}</td>
+                <td class="py-3 px-4 text-sm">
+                    <span class="text-gray-400">
+                        <i class="fas fa-clock mr-1"></i>Not processed
+                    </span>
+                </td>
+                <td class="py-3 px-4 text-sm text-gray-400">
+                    ${this.formatDate(file.modified)}
+                    <div class="text-xs text-gray-500 mt-1">${this.formatFileSize(file.size)}</div>
+                </td>
             </tr>
         `).join('');
+
+        // Add vault information footer
+        if (recentFiles.length > 0 && files.vault_path) {
+            const vaultNote = document.createElement('tr');
+            vaultNote.innerHTML = `
+                <td colspan="4" class="py-2 px-4 text-xs text-gray-500 border-t border-slate-700/30">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <i class="fas fa-info-circle mr-1"></i>
+                            Showing ${recentFiles.length} of ${files.total_files || 0} files from vault
+                        </div>
+                        <div class="flex items-center space-x-4">
+                            ${files.is_obsidian_vault ? 
+                                '<span class="text-green-400"><i class="fas fa-check mr-1"></i>Valid Obsidian Vault</span>' : 
+                                '<span class="text-yellow-400"><i class="fas fa-exclamation-triangle mr-1"></i>Not an Obsidian Vault</span>'
+                            }
+                        </div>
+                    </div>
+                </td>
+            `;
+            tbody.appendChild(vaultNote);
+        }
     }
 
     // Automator View
@@ -1060,8 +1560,25 @@ class ObsidianTagAutomatorApp {
 
     // Utility Methods
     refreshDashboard() {
-        this.loadDashboard();
-        this.showNotification('info', 'Refreshing', 'Dashboard data is being refreshed...');
+        // Clear relevant cache entries
+        const keysToDelete = [];
+        for (const [key] of this.cache) {
+            if (key.includes('/status') || key.includes('/files') || key.includes('/tags')) {
+                keysToDelete.push(key);
+            }
+        }
+        keysToDelete.forEach(key => this.cache.delete(key));
+        
+        // Show loading state
+        this.showNotification('info', 'Refreshing', 'Updating dashboard data...');
+        
+        // Reload dashboard
+        this.loadDashboard().then(() => {
+            this.showNotification('success', 'Refreshed', 'Dashboard data updated successfully');
+        }).catch((error) => {
+            console.error('Failed to refresh dashboard:', error);
+            this.showNotification('error', 'Refresh Failed', 'Failed to update dashboard data');
+        });
     }
 
     formatDate(dateString) {

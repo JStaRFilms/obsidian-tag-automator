@@ -75,49 +75,229 @@ class ObsidianTagAutomatorWeb:
             """Serve the main dashboard."""
             return render_template('index.html')
         
+        @self.app.route('/api/status/quick')
+        def get_quick_status():
+            """Get basic system status quickly without heavy operations."""
+            try:
+                vault_path = self.automator.vault_path
+                
+                response = {
+                    'success': True,
+                    'vault_path': str(vault_path),
+                    'vault_exists': vault_path.exists(),
+                    'is_obsidian_vault': (vault_path / '.obsidian').exists() if vault_path.exists() else False,
+                    'ai_status': bool(self.automator.ai_integration.gemini_model),
+                    'timestamp': datetime.now().isoformat()
+                }
+                return jsonify(response)
+            except Exception as e:
+                return jsonify({
+                    'success': False, 
+                    'error': str(e),
+                    'vault_path': str(self.automator.vault_path) if hasattr(self.automator, 'vault_path') else 'Unknown'
+                }), 500
+        
         @self.app.route('/api/status')
         def get_status():
             """Get system status and vault information."""
             try:
+                # Get vault stats (may be cached)
                 stats_result = self.automator.get_vault_stats()
                 config = self.automator.get_config()
+                vault_path = self.automator.vault_path
+                
+                # Check vault accessibility and validity
+                vault_exists = vault_path.exists()
+                is_obsidian_vault = (vault_path / '.obsidian').exists() if vault_exists else False
+                vault_readable = False
+                vault_stats = None
+                
+                if vault_exists:
+                    try:
+                        # Test if we can read the vault directory
+                        list(vault_path.iterdir())
+                        vault_readable = True
+                        vault_stats = {
+                            'vault_size_bytes': sum(f.stat().st_size for f in vault_path.rglob('*') if f.is_file()),
+                            'total_items': len(list(vault_path.rglob('*')))
+                        }
+                    except (PermissionError, OSError):
+                        vault_readable = False
                 
                 response = {
                     'success': True,
-                    'vault_path': str(self.automator.vault_path),
+                    'vault_path': str(vault_path),
+                    'vault_info': {
+                        'exists': vault_exists,
+                        'readable': vault_readable,
+                        'is_obsidian_vault': is_obsidian_vault,
+                        'absolute_path': str(vault_path.absolute()),
+                        'stats': vault_stats
+                    },
                     'ai_status': bool(self.automator.ai_integration.gemini_model),
                     'stats': stats_result['stats'] if stats_result['success'] else {},
                     'config': {
                         'excluded_tags_count': len(config.get('excluded_tags', [])),
                         'excluded_paths_count': len(config.get('excluded_paths', [])),
                         'ai_prompt_configured': bool(config.get('ai_prompt'))
+                    },
+                    'system_info': {
+                        'current_working_directory': str(Path.cwd()),
+                        'python_executable': os.sys.executable if hasattr(os, 'sys') else 'Unknown'
                     }
                 }
                 return jsonify(response)
             except Exception as e:
-                return jsonify({'success': False, 'error': str(e)}), 500
+                return jsonify({
+                    'success': False, 
+                    'error': str(e),
+                    'vault_path': str(self.automator.vault_path) if hasattr(self.automator, 'vault_path') else 'Unknown',
+                    'debug_info': {
+                        'current_working_directory': str(Path.cwd()),
+                        'exception_type': type(e).__name__
+                    }
+                }), 500
+        
+        @self.app.route('/api/files/recent')
+        def get_recent_files():
+            """Get recent files with pagination for progressive loading."""
+            try:
+                limit = int(request.args.get('limit', 20))
+                offset = int(request.args.get('offset', 0))
+                sort_by = request.args.get('sort', 'modified')  # 'modified', 'name', 'size'
+                
+                vault_path = self.automator.vault_path
+                
+                if not vault_path.exists():
+                    return jsonify({
+                        'success': False,
+                        'error': f'Vault path does not exist: {vault_path}'
+                    }), 404
+                
+                files = []
+                for root, dirs, file_names in os.walk(vault_path):
+                    # Skip .obsidian and other hidden directories
+                    dirs[:] = [d for d in dirs if not d.startswith('.')]
+                    
+                    for file_name in file_names:
+                        if file_name.endswith('.md'):
+                            file_path = Path(root) / file_name
+                            relative_path = file_path.relative_to(vault_path)
+                            
+                            try:
+                                stat = file_path.stat()
+                                files.append({
+                                    'name': file_name,
+                                    'path': str(relative_path),
+                                    'full_path': str(file_path),
+                                    'size': stat.st_size,
+                                    'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                                    'created': datetime.fromtimestamp(stat.st_ctime).isoformat()
+                                })
+                            except (OSError, IOError):
+                                continue
+                
+                # Sort files
+                if sort_by == 'modified':
+                    files.sort(key=lambda x: x['modified'], reverse=True)
+                elif sort_by == 'name':
+                    files.sort(key=lambda x: x['name'].lower())
+                elif sort_by == 'size':
+                    files.sort(key=lambda x: x['size'], reverse=True)
+                
+                # Apply pagination
+                total_files = len(files)
+                paginated_files = files[offset:offset + limit]
+                
+                return jsonify({
+                    'success': True,
+                    'files': paginated_files,
+                    'pagination': {
+                        'total': total_files,
+                        'limit': limit,
+                        'offset': offset,
+                        'has_more': offset + limit < total_files
+                    },
+                    'vault_info': {
+                        'path': str(vault_path),
+                        'is_obsidian_vault': (vault_path / '.obsidian').exists()
+                    }
+                })
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'error': str(e)
+                }), 500
         
         @self.app.route('/api/files')
         def get_files():
             """Get list of markdown files in the vault."""
             try:
                 files = []
-                for root, _, file_names in os.walk(self.automator.vault_path):
+                vault_path = self.automator.vault_path
+                
+                # Validate vault path exists and is accessible
+                if not vault_path.exists():
+                    return jsonify({
+                        'success': False, 
+                        'error': f'Vault path does not exist: {vault_path}',
+                        'vault_path': str(vault_path)
+                    }), 404
+                
+                # Check if it's actually an Obsidian vault
+                obsidian_folder = vault_path / '.obsidian'
+                is_obsidian_vault = obsidian_folder.exists()
+                
+                file_count = 0
+                scanned_directories = []
+                
+                for root, dirs, file_names in os.walk(vault_path):
+                    root_path = Path(root)
+                    relative_root = root_path.relative_to(vault_path)
+                    scanned_directories.append(str(relative_root))
+                    
+                    # Skip .obsidian and other hidden directories
+                    dirs[:] = [d for d in dirs if not d.startswith('.') or d == '.obsidian']
+                    
                     for file_name in file_names:
                         if file_name.endswith('.md') and '.obsidian' not in root:
-                            file_path = Path(root) / file_name
-                            relative_path = file_path.relative_to(self.automator.vault_path)
-                            files.append({
-                                'name': file_name,
-                                'path': str(relative_path),
-                                'full_path': str(file_path),
-                                'size': file_path.stat().st_size,
-                                'modified': datetime.fromtimestamp(file_path.stat().st_mtime).isoformat()
-                            })
+                            file_count += 1
+                            file_path = root_path / file_name
+                            relative_path = file_path.relative_to(vault_path)
+                            
+                            try:
+                                stat = file_path.stat()
+                                files.append({
+                                    'name': file_name,
+                                    'path': str(relative_path),
+                                    'full_path': str(file_path),
+                                    'size': stat.st_size,
+                                    'modified': datetime.fromtimestamp(stat.st_mtime).isoformat()
+                                })
+                            except (OSError, IOError) as e:
+                                # Skip files that can't be accessed
+                                print(f"Warning: Could not access file {file_path}: {e}")
+                                continue
                 
-                return jsonify({'success': True, 'files': files})
+                return jsonify({
+                    'success': True, 
+                    'files': files,
+                    'vault_path': str(vault_path),
+                    'is_obsidian_vault': is_obsidian_vault,
+                    'total_files': file_count,
+                    'scanned_directories': scanned_directories[:10],  # Limit to first 10 for debugging
+                    'scan_summary': {
+                        'total_directories': len(scanned_directories),
+                        'total_md_files': file_count,
+                        'vault_root': str(vault_path)
+                    }
+                })
             except Exception as e:
-                return jsonify({'success': False, 'error': str(e)}), 500
+                return jsonify({
+                    'success': False, 
+                    'error': str(e),
+                    'vault_path': str(self.automator.vault_path) if hasattr(self.automator, 'vault_path') else 'Unknown'
+                }), 500
         
         @self.app.route('/api/tags')
         def get_tags():

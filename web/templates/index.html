@@ -77,6 +77,40 @@
             100% { transform: rotate(360deg); }
         }
 
+        /* Skeleton Loading Styles */
+        .skeleton {
+            background: linear-gradient(90deg, #374151 25%, #4b5563 50%, #374151 75%);
+            background-size: 200% 100%;
+            animation: loading 1.5s infinite;
+        }
+
+        @keyframes loading {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+
+        .skeleton-text {
+            height: 1rem;
+            border-radius: 0.25rem;
+        }
+
+        .skeleton-title {
+            height: 1.5rem;
+            border-radius: 0.25rem;
+        }
+
+        .skeleton-number {
+            height: 2rem;
+            width: 4rem;
+            border-radius: 0.25rem;
+        }
+
+        .skeleton-status {
+            height: 1.25rem;
+            width: 5rem;
+            border-radius: 0.5rem;
+        }
+
         .fade-in {
             animation: fadeIn 0.5s ease-in;
         }
@@ -178,26 +212,41 @@
                     <div class="space-y-3" id="status-panel">
                         <div class="flex justify-between items-center">
                             <span class="text-gray-400">Vault Path:</span>
-                            <span class="text-sm terminal-font text-green-400" id="vault-path">Loading...</span>
+                            <span class="text-sm terminal-font text-green-400" id="vault-path">
+                                <div class="skeleton skeleton-text w-32 hidden" id="vault-path-skeleton"></div>
+                                <span id="vault-path-text">Loading...</span>
+                            </span>
                         </div>
                         <div class="flex justify-between items-center">
                             <span class="text-gray-400">AI Status:</span>
                             <span class="flex items-center" id="ai-status">
-                                <div class="loading-spinner mr-2"></div>
-                                <span class="text-yellow-400">Checking...</span>
+                                <div class="skeleton skeleton-status hidden" id="ai-status-skeleton"></div>
+                                <div class="flex items-center" id="ai-status-content">
+                                    <div class="loading-spinner mr-2"></div>
+                                    <span class="text-yellow-400">Checking...</span>
+                                </div>
                             </span>
                         </div>
                         <div class="flex justify-between items-center">
                             <span class="text-gray-400">Total Files:</span>
-                            <span class="text-blue-400" id="total-files">-</span>
+                            <span class="text-blue-400" id="total-files">
+                                <div class="skeleton skeleton-number hidden" id="total-files-skeleton"></div>
+                                <span id="total-files-text">-</span>
+                            </span>
                         </div>
                         <div class="flex justify-between items-center">
                             <span class="text-gray-400">Tagged Files:</span>
-                            <span class="text-blue-400" id="tagged-files">-</span>
+                            <span class="text-blue-400" id="tagged-files">
+                                <div class="skeleton skeleton-number hidden" id="tagged-files-skeleton"></div>
+                                <span id="tagged-files-text">-</span>
+                            </span>
                         </div>
                         <div class="flex justify-between items-center">
                             <span class="text-gray-400">Unique Tags:</span>
-                            <span class="text-blue-400" id="unique-tags">-</span>
+                            <span class="text-blue-400" id="unique-tags">
+                                <div class="skeleton skeleton-number hidden" id="unique-tags-skeleton"></div>
+                                <span id="unique-tags-text">-</span>
+                            </span>
                         </div>
                     </div>
                 </div>
@@ -239,7 +288,10 @@
                                 <div class="flex justify-between items-start">
                                     <div>
                                         <p class="text-gray-400 text-sm">Total Files</p>
-                                        <p class="text-3xl font-bold mt-1" id="dashboard-total-files">-</p>
+                                        <div class="relative">
+                                            <div class="skeleton skeleton-title w-16 mt-1" id="dashboard-total-files-skeleton"></div>
+                                            <p class="text-3xl font-bold mt-1 hidden" id="dashboard-total-files">-</p>
+                                        </div>
                                     </div>
                                     <div class="bg-blue-500/20 p-3 rounded-lg">
                                         <i class="fas fa-file-alt text-blue-400 text-xl"></i>
@@ -254,7 +306,10 @@
                                 <div class="flex justify-between items-start">
                                     <div>
                                         <p class="text-gray-400 text-sm">Tagged Files</p>
-                                        <p class="text-3xl font-bold mt-1" id="dashboard-tagged-files">-</p>
+                                        <div class="relative">
+                                            <div class="skeleton skeleton-title w-16 mt-1" id="dashboard-tagged-files-skeleton"></div>
+                                            <p class="text-3xl font-bold mt-1 hidden" id="dashboard-tagged-files">-</p>
+                                        </div>
                                     </div>
                                     <div class="bg-green-500/20 p-3 rounded-lg">
                                         <i class="fas fa-tags text-green-400 text-xl"></i>
@@ -269,7 +324,10 @@
                                 <div class="flex justify-between items-start">
                                     <div>
                                         <p class="text-gray-400 text-sm">Unique Tags</p>
-                                        <p class="text-3xl font-bold mt-1" id="dashboard-unique-tags">-</p>
+                                        <div class="relative">
+                                            <div class="skeleton skeleton-title w-16 mt-1" id="dashboard-unique-tags-skeleton"></div>
+                                            <p class="text-3xl font-bold mt-1 hidden" id="dashboard-unique-tags">-</p>
+                                        </div>
                                     </div>
                                     <div class="bg-purple-500/20 p-3 rounded-lg">
                                         <i class="fas fa-hashtag text-purple-400 text-xl"></i>
@@ -296,9 +354,52 @@
                                             </tr>
                                         </thead>
                                         <tbody id="recent-activity">
-                                            <tr>
+                                            <tr id="recent-activity-loading">
                                                 <td colspan="4" class="py-8 text-center text-gray-400">
                                                     <i class="fas fa-spinner fa-spin mr-2"></i> Loading recent activity...
+                                                </td>
+                                            </tr>
+                                            <!-- Skeleton rows for better perceived performance -->
+                                            <tr class="skeleton-row hidden" id="skeleton-row-1">
+                                                <td class="py-3 px-4">
+                                                    <div class="skeleton skeleton-text w-32"></div>
+                                                </td>
+                                                <td class="py-3 px-4">
+                                                    <div class="skeleton skeleton-status w-16"></div>
+                                                </td>
+                                                <td class="py-3 px-4">
+                                                    <div class="skeleton skeleton-text w-24"></div>
+                                                </td>
+                                                <td class="py-3 px-4">
+                                                    <div class="skeleton skeleton-text w-20"></div>
+                                                </td>
+                                            </tr>
+                                            <tr class="skeleton-row hidden" id="skeleton-row-2">
+                                                <td class="py-3 px-4">
+                                                    <div class="skeleton skeleton-text w-40"></div>
+                                                </td>
+                                                <td class="py-3 px-4">
+                                                    <div class="skeleton skeleton-status w-16"></div>
+                                                </td>
+                                                <td class="py-3 px-4">
+                                                    <div class="skeleton skeleton-text w-28"></div>
+                                                </td>
+                                                <td class="py-3 px-4">
+                                                    <div class="skeleton skeleton-text w-20"></div>
+                                                </td>
+                                            </tr>
+                                            <tr class="skeleton-row hidden" id="skeleton-row-3">
+                                                <td class="py-3 px-4">
+                                                    <div class="skeleton skeleton-text w-36"></div>
+                                                </td>
+                                                <td class="py-3 px-4">
+                                                    <div class="skeleton skeleton-status w-16"></div>
+                                                </td>
+                                                <td class="py-3 px-4">
+                                                    <div class="skeleton skeleton-text w-32"></div>
+                                                </td>
+                                                <td class="py-3 px-4">
+                                                    <div class="skeleton skeleton-text w-20"></div>
                                                 </td>
                                             </tr>
                                         </tbody>
