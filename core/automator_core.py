@@ -35,6 +35,11 @@ class ObsidianTagAutomatorCore:
         # Constants
         self.MAX_TAGS_PER_FILE = 15
         self.MAX_ALIAS_LENGTH_DIFF = 10
+        
+        # Cache for expensive operations
+        self._vault_stats_cache = None
+        self._vault_stats_cache_timestamp = 0
+        self._cache_ttl = 300  # 5 minutes cache TTL
 
     def get_vault_path(self):
         """Returns the vault path."""
@@ -597,11 +602,23 @@ Example response format:
 
     def get_vault_stats(self):
         """
-        Returns statistics about the vault.
+        Returns statistics about the vault with caching to improve performance.
         
         Returns:
             dict: Vault statistics.
         """
+        import time
+        
+        # Check if we have cached data that's still valid
+        current_time = time.time()
+        if (self._vault_stats_cache and 
+            (current_time - self._vault_stats_cache_timestamp) < self._cache_ttl):
+            return {
+                'success': True,
+                'message': 'Vault statistics retrieved (cached)',
+                'stats': self._vault_stats_cache
+            }
+        
         stats = {
             'total_files': 0,
             'tagged_files': 0,
@@ -638,6 +655,10 @@ Example response format:
                         stats['untagged_files'] += 1
         
         stats['total_tags'] = len(all_tags)
+        
+        # Cache the results
+        self._vault_stats_cache = stats
+        self._vault_stats_cache_timestamp = current_time
         
         return {
             'success': True,

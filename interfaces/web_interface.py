@@ -77,16 +77,23 @@ class ObsidianTagAutomatorWeb:
         
         @self.app.route('/api/status/quick')
         def get_quick_status():
-            """Get basic system status quickly without heavy operations."""
+            """Get basic system status quickly without any file system operations."""
             try:
                 vault_path = self.automator.vault_path
                 
+                # Minimal checks only - no file system access at all
+                vault_path_str = str(vault_path) if vault_path else 'Not set'
+                
+                # Very basic AI status check - just check if model exists
+                ai_status = hasattr(self.automator.ai_integration, 'gemini_model') and \
+                           self.automator.ai_integration.gemini_model is not None
+                
                 response = {
                     'success': True,
-                    'vault_path': str(vault_path),
-                    'vault_exists': vault_path.exists(),
-                    'is_obsidian_vault': (vault_path / '.obsidian').exists() if vault_path.exists() else False,
-                    'ai_status': bool(self.automator.ai_integration.gemini_model),
+                    'vault_path': vault_path_str,
+                    'vault_exists': None,  # Skip expensive check
+                    'is_obsidian_vault': None,  # Skip expensive check 
+                    'ai_status': ai_status,
                     'timestamp': datetime.now().isoformat()
                 }
                 return jsonify(response)
@@ -94,48 +101,93 @@ class ObsidianTagAutomatorWeb:
                 return jsonify({
                     'success': False, 
                     'error': str(e),
-                    'vault_path': str(self.automator.vault_path) if hasattr(self.automator, 'vault_path') else 'Unknown'
+                    'vault_path': 'Unknown',
+                    'ai_status': False,
+                    'timestamp': datetime.now().isoformat()
+                }), 500
+        
+        @self.app.route('/api/vault/validate')
+        def validate_vault():
+            """Validate vault path existence and type - separate endpoint for non-critical checks."""
+            try:
+                vault_path = self.automator.vault_path
+                
+                if not vault_path:
+                    return jsonify({
+                        'success': True,
+                        'vault_exists': False,
+                        'is_obsidian_vault': False,
+                        'vault_readable': False,
+                        'message': 'No vault path configured'
+                    })
+                
+                # Check if vault exists
+                vault_exists = vault_path.exists()
+                is_obsidian_vault = False
+                vault_readable = False
+                
+                if vault_exists:
+                    try:
+                        # Check if it's an Obsidian vault
+                        is_obsidian_vault = (vault_path / '.obsidian').exists()
+                        # Test if we can read the vault directory
+                        list(vault_path.iterdir())
+                        vault_readable = True
+                    except (PermissionError, OSError):
+                        vault_readable = False
+                
+                return jsonify({
+                    'success': True,
+                    'vault_exists': vault_exists,
+                    'is_obsidian_vault': is_obsidian_vault,
+                    'vault_readable': vault_readable,
+                    'vault_path': str(vault_path)
+                })
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'error': str(e)
                 }), 500
         
         @self.app.route('/api/status')
         def get_status():
-            """Get system status and vault information."""
+            """Get system status and vault information - optimized for speed."""
             try:
-                # Get vault stats (may be cached)
-                stats_result = self.automator.get_vault_stats()
-                config = self.automator.get_config()
+                # Get request parameters
+                include_stats = request.args.get('stats', 'false').lower() == 'true'  # Default to false for speed
+                
                 vault_path = self.automator.vault_path
                 
-                # Check vault accessibility and validity
-                vault_exists = vault_path.exists()
-                is_obsidian_vault = (vault_path / '.obsidian').exists() if vault_exists else False
-                vault_readable = False
-                vault_stats = None
+                # Quick vault path validation only - no expensive operations
+                vault_path_str = str(vault_path) if vault_path else 'Not set'
                 
-                if vault_exists:
+                # Only get expensive stats if explicitly requested
+                stats_result = {'stats': {}} 
+                if include_stats:
                     try:
-                        # Test if we can read the vault directory
-                        list(vault_path.iterdir())
-                        vault_readable = True
-                        vault_stats = {
-                            'vault_size_bytes': sum(f.stat().st_size for f in vault_path.rglob('*') if f.is_file()),
-                            'total_items': len(list(vault_path.rglob('*')))
+                        stats_result = self.automator.get_vault_stats()
+                    except Exception as e:
+                        print(f"Warning: Failed to get vault stats: {e}")
+                        stats_result = {
+                            'success': False,
+                            'stats': {},
+                            'error': str(e)
                         }
-                    except (PermissionError, OSError):
-                        vault_readable = False
+                
+                # Get config without expensive operations
+                config = self.automator.get_config()
                 
                 response = {
                     'success': True,
-                    'vault_path': str(vault_path),
+                    'vault_path': vault_path_str,
                     'vault_info': {
-                        'exists': vault_exists,
-                        'readable': vault_readable,
-                        'is_obsidian_vault': is_obsidian_vault,
-                        'absolute_path': str(vault_path.absolute()),
-                        'stats': vault_stats
+                        'path': vault_path_str,
+                        'absolute_path': str(vault_path.absolute()) if vault_path else 'Not set'
                     },
-                    'ai_status': bool(self.automator.ai_integration.gemini_model),
-                    'stats': stats_result['stats'] if stats_result['success'] else {},
+                    'ai_status': hasattr(self.automator.ai_integration, 'gemini_model') and \
+                               self.automator.ai_integration.gemini_model is not None,
+                    'stats': stats_result.get('stats', {}),
+                    'stats_included': include_stats,
                     'config': {
                         'excluded_tags_count': len(config.get('excluded_tags', [])),
                         'excluded_paths_count': len(config.get('excluded_paths', [])),
@@ -143,7 +195,7 @@ class ObsidianTagAutomatorWeb:
                     },
                     'system_info': {
                         'current_working_directory': str(Path.cwd()),
-                        'python_executable': os.sys.executable if hasattr(os, 'sys') else 'Unknown'
+                        'timestamp': datetime.now().isoformat()
                     }
                 }
                 return jsonify(response)
@@ -154,7 +206,8 @@ class ObsidianTagAutomatorWeb:
                     'vault_path': str(self.automator.vault_path) if hasattr(self.automator, 'vault_path') else 'Unknown',
                     'debug_info': {
                         'current_working_directory': str(Path.cwd()),
-                        'exception_type': type(e).__name__
+                        'exception_type': type(e).__name__,
+                        'timestamp': datetime.now().isoformat()
                     }
                 }), 500
         

@@ -212,14 +212,14 @@ class ObsidianTagAutomatorApp {
                 console.warn('Quick status failed, continuing with full load:', error);
             }
             
-            // Step 2: Load detailed data in parallel
+            // Step 2: Load detailed data in parallel (without expensive stats)
             const [statusPromise, filesPromise] = [
                 this.apiGet('/status').catch(error => ({ 
                     success: false, 
                     error: error.message,
                     fallback: true 
                 })),
-                this.apiGet('/files').catch(error => ({ 
+                this.apiGet('/files/recent?limit=20&offset=0&sort=modified').catch(error => ({ 
                     success: false, 
                     error: error.message,
                     fallback: true 
@@ -247,9 +247,9 @@ class ObsidianTagAutomatorApp {
                 this.showLoadingError('status');
             }
 
-            // Handle files data - use progressive loading
+            // Handle files data - use recent files progressive loading
             if (files.success && !files.fallback) {
-                this.updateRecentActivity(files);
+                this.updateRecentActivityProgressive(files);
             } else {
                 // Try progressive loading as fallback
                 console.warn('Using progressive loading for files');
@@ -269,14 +269,21 @@ class ObsidianTagAutomatorApp {
     updateBasicStatus(quickStatus) {
         if (!quickStatus.success) return;
         
-        // Update basic vault path immediately
+        // Store status for later use
+        this.currentVaultPath = quickStatus.vault_path;
+        this.aiOnline = quickStatus.ai_status;
+        
+        // Update basic vault path immediately in status panel
         const vaultPathText = document.getElementById('vault-path-text') || document.getElementById('vault-path');
         if (vaultPathText) {
             vaultPathText.textContent = quickStatus.vault_path;
-            vaultPathText.style.color = quickStatus.vault_exists ? '#10b981' : '#ef4444';
+            // Color coding only if we have validation data
+            if (quickStatus.vault_exists !== null) {
+                vaultPathText.style.color = quickStatus.vault_exists ? '#10b981' : '#ef4444';
+            }
         }
         
-        // Update AI status immediately
+        // Update AI status immediately in status panel
         const aiStatusContent = document.getElementById('ai-status-content') || document.getElementById('ai-status');
         if (aiStatusContent) {
             if (quickStatus.ai_status) {
@@ -292,34 +299,150 @@ class ObsidianTagAutomatorApp {
             }
         }
         
-        // Show vault status in Recent Activity immediately
+        // IMPORTANT: Also update dashboard vault info and AI status immediately
+        const dashboardVaultPath = document.getElementById('dashboard-vault-path');
+        if (dashboardVaultPath) {
+            dashboardVaultPath.textContent = quickStatus.vault_path;
+        }
+        
+        const dashboardAiStatus = document.getElementById('dashboard-ai-status');
+        if (dashboardAiStatus) {
+            if (quickStatus.ai_status) {
+                dashboardAiStatus.innerHTML = `
+                    <span class="w-2 h-2 bg-green-500 rounded-full mr-2 pulse-animation"></span>
+                    <span class="text-green-400">Online</span>
+                `;
+            } else {
+                dashboardAiStatus.innerHTML = `
+                    <span class="w-2 h-2 bg-red-500 rounded-full mr-2"></span>
+                    <span class="text-red-400">Offline</span>
+                `;
+            }
+        }
+        
+        // Show vault status warnings in Recent Activity if there are issues
+        if (quickStatus.vault_exists === false) {
+            const tbody = document.getElementById('recent-activity');
+            if (tbody) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="4" class="py-8 text-center text-red-400">
+                            <i class="fas fa-exclamation-triangle mr-2"></i> Vault path does not exist
+                            <div class="text-sm mt-2 text-gray-400">Path: ${quickStatus.vault_path}</div>
+                            <div class="text-sm mt-1 text-blue-400">
+                                <i class="fas fa-info-circle mr-1"></i>
+                                Please check the vault path in settings
+                            </div>
+                        </td>
+                    </tr>
+                `;
+            }
+        } else if (quickStatus.is_obsidian_vault === false) {
+            const tbody = document.getElementById('recent-activity');
+            if (tbody) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="4" class="py-8 text-center text-yellow-400">
+                            <i class="fas fa-exclamation-triangle mr-2"></i> Not an Obsidian vault
+                            <div class="text-sm mt-2 text-gray-400">Path: ${quickStatus.vault_path}</div>
+                            <div class="text-sm mt-1 text-blue-400">
+                                <i class="fas fa-info-circle mr-1"></i>
+                                Directory exists but no .obsidian folder found
+                            </div>
+                        </td>
+                    </tr>
+                `;
+            }
+        }
+    }
+    
+    updateRecentActivityProgressive(recentFiles) {
         const tbody = document.getElementById('recent-activity');
-        if (tbody && !quickStatus.vault_exists) {
+        
+        if (!recentFiles || !recentFiles.files || recentFiles.files.length === 0) {
+            // Show diagnostic information
+            let diagnosticInfo = '';
+            if (recentFiles && recentFiles.vault_info) {
+                diagnosticInfo = `
+                    <div class="text-sm mt-2 space-y-1">
+                        <div><strong>Vault Path:</strong> ${recentFiles.vault_info.path}</div>
+                        <div><strong>Is Obsidian Vault:</strong> ${recentFiles.vault_info.is_obsidian_vault ? 'Yes' : 'No'}</div>
+                        <div><strong>Total Files Found:</strong> ${recentFiles.pagination ? recentFiles.pagination.total : 0}</div>
+                    </div>
+                `;
+            }
+            
             tbody.innerHTML = `
                 <tr>
-                    <td colspan="4" class="py-8 text-center text-red-400">
-                        <i class="fas fa-exclamation-triangle mr-2"></i> Vault path does not exist
-                        <div class="text-sm mt-2 text-gray-400">Path: ${quickStatus.vault_path}</div>
-                        <div class="text-sm mt-1 text-blue-400">
+                    <td colspan="4" class="py-8 text-center text-gray-400">
+                        <i class="fas fa-folder-open mr-2"></i> No markdown files found in vault
+                        ${diagnosticInfo}
+                        <div class="text-sm mt-4 text-blue-400">
                             <i class="fas fa-info-circle mr-1"></i>
-                            Please check the vault path in settings
+                            Check that the vault path points to a directory containing .md files
                         </div>
                     </td>
                 </tr>
             `;
-        } else if (tbody && !quickStatus.is_obsidian_vault) {
-            tbody.innerHTML = `
-                <tr>
-                    <td colspan="4" class="py-8 text-center text-yellow-400">
-                        <i class="fas fa-exclamation-triangle mr-2"></i> Not an Obsidian vault
-                        <div class="text-sm mt-2 text-gray-400">Path: ${quickStatus.vault_path}</div>
-                        <div class="text-sm mt-1 text-blue-400">
+            return;
+        }
+
+        // Show recent files
+        tbody.innerHTML = recentFiles.files.map(file => `
+            <tr class="border-b border-slate-700/30 hover:bg-slate-700/20 transition-colors">
+                <td class="py-3 px-4 text-sm terminal-font text-blue-300" title="${file.full_path}">
+                    ${file.name}
+                    <div class="text-xs text-gray-500 mt-1">${file.path}</div>
+                </td>
+                <td class="py-3 px-4 text-sm">
+                    <span class="bg-blue-900/50 text-blue-400 py-1 px-2 rounded-full text-xs">
+                        <i class="fas fa-file-alt mr-1"></i>Indexed
+                    </span>
+                </td>
+                <td class="py-3 px-4 text-sm">
+                    <span class="text-gray-400">
+                        <i class="fas fa-clock mr-1"></i>Not processed
+                    </span>
+                </td>
+                <td class="py-3 px-4 text-sm text-gray-400">
+                    ${this.formatDate(file.modified)}
+                    <div class="text-xs text-gray-500 mt-1">${this.formatFileSize(file.size)}</div>
+                </td>
+            </tr>
+        `).join('');
+
+        // Add vault information footer with load more button
+        if (recentFiles.files.length > 0 && recentFiles.vault_info) {
+            const hasMore = recentFiles.pagination && recentFiles.pagination.has_more;
+            const totalFiles = recentFiles.pagination ? recentFiles.pagination.total : recentFiles.files.length;
+            
+            const vaultNote = document.createElement('tr');
+            vaultNote.innerHTML = `
+                <td colspan="4" class="py-2 px-4 text-xs text-gray-500 border-t border-slate-700/30">
+                    <div class="flex items-center justify-between">
+                        <div>
                             <i class="fas fa-info-circle mr-1"></i>
-                            Directory exists but no .obsidian folder found
+                            Showing ${recentFiles.files.length} of ${totalFiles} files from vault
                         </div>
-                    </td>
-                </tr>
+                        <div class="flex items-center space-x-4">
+                            ${recentFiles.vault_info.is_obsidian_vault ? 
+                                '<span class="text-green-400"><i class="fas fa-check mr-1"></i>Valid Obsidian Vault</span>' : 
+                                '<span class="text-yellow-400"><i class="fas fa-exclamation-triangle mr-1"></i>Not an Obsidian Vault</span>'
+                            }
+                        </div>
+                    </div>
+                    ${hasMore ? `
+                        <div class="mt-2 text-center">
+                            <button onclick="app.loadMoreRecentFiles(${recentFiles.files.length})" 
+                                    class="text-blue-400 hover:text-blue-300 text-sm transition-colors">
+                                <i class="fas fa-chevron-down mr-2"></i>
+                                Load ${Math.min(20, totalFiles - recentFiles.files.length)} more files
+                            </button>
+                        </div>
+                    ` : ''}
+                </td>
             `;
+            tbody.appendChild(vaultNote);
         }
     }
     
@@ -441,18 +564,13 @@ class ObsidianTagAutomatorApp {
     }
 
     addPerformanceIndicator() {
-        // Add performance indicator to the status panel
-        const statusPanel = document.getElementById('status-panel');
-        if (statusPanel) {
-            const perfIndicator = document.createElement('div');
-            perfIndicator.className = 'flex justify-between items-center mt-3 pt-3 border-t border-slate-600';
-            perfIndicator.innerHTML = `
-                <span class="text-gray-400 text-xs">Performance:</span>
-                <span class="text-xs" id="performance-indicator">
-                    <span class="text-green-400">●</span> Good
-                </span>
+        // Performance indicator is now part of the HTML template
+        // Just ensure it's visible and initialize it
+        const indicator = document.getElementById('performance-indicator');
+        if (indicator) {
+            indicator.innerHTML = `
+                <span class="text-green-400">●</span> Initializing...
             `;
-            statusPanel.appendChild(perfIndicator);
         }
     }
     
