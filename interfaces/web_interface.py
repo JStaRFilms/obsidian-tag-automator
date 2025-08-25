@@ -211,6 +211,41 @@ class ObsidianTagAutomatorWeb:
                     }
                 }), 500
         
+        @self.app.route('/api/stats')
+        def get_vault_stats():
+            """Get vault statistics separately for dashboard metrics."""
+            try:
+                # Get vault statistics
+                stats_result = self.automator.get_vault_stats()
+                
+                if stats_result.get('success', False):
+                    return jsonify({
+                        'success': True,
+                        'stats': stats_result['stats'],
+                        'timestamp': datetime.now().isoformat()
+                    })
+                else:
+                    return jsonify({
+                        'success': False,
+                        'error': stats_result.get('message', 'Failed to get vault statistics'),
+                        'stats': {},
+                        'timestamp': datetime.now().isoformat()
+                    })
+            except Exception as e:
+                error_message = str(e)
+                print(f"Error getting vault stats: {error_message}")
+                
+                # Provide helpful error context
+                vault_path = self.automator.vault_path if hasattr(self.automator, 'vault_path') else None
+                
+                return jsonify({
+                    'success': False,
+                    'error': error_message,
+                    'stats': {},
+                    'vault_path': str(vault_path) if vault_path else 'Not set',
+                    'timestamp': datetime.now().isoformat()
+                }), 500
+        
         @self.app.route('/api/files/recent')
         def get_recent_files():
             """Get recent files with pagination for progressive loading."""

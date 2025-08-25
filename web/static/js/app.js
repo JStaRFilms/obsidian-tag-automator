@@ -212,12 +212,18 @@ class ObsidianTagAutomatorApp {
                 console.warn('Quick status failed, continuing with full load:', error);
             }
             
-            // Step 2: Load detailed data in parallel (without expensive stats)
-            const [statusPromise, filesPromise] = [
+            // Step 2: Load data in parallel
+            const [statusPromise, statsPromise, filesPromise] = [
                 this.apiGet('/status').catch(error => ({ 
                     success: false, 
                     error: error.message,
                     fallback: true 
+                })),
+                this.apiGet('/stats').catch(error => ({
+                    success: false,
+                    error: error.message,
+                    stats: {},
+                    fallback: true
                 })),
                 this.apiGet('/files/recent?limit=20&offset=0&sort=modified').catch(error => ({ 
                     success: false, 
@@ -226,25 +232,32 @@ class ObsidianTagAutomatorApp {
                 }))
             ];
             
-            // Wait for both with timeout
+            // Wait for all with timeout
             const timeoutPromise = new Promise((_, reject) => 
                 setTimeout(() => reject(new Error('Request timeout')), 10000)
             );
             
-            const [status, files] = await Promise.race([
-                Promise.all([statusPromise, filesPromise]),
+            const [status, stats, files] = await Promise.race([
+                Promise.all([statusPromise, statsPromise, filesPromise]),
                 timeoutPromise
             ]);
 
             // Handle status data
             if (status.success && !status.fallback) {
                 this.updateStatusPanel(status);
-                this.updateDashboardStats(status.stats);
                 this.currentVaultPath = status.vault_path;
                 this.aiOnline = status.ai_status;
             } else if (status.fallback) {
                 console.error('Failed to load detailed status:', status.error);
                 this.showLoadingError('status');
+            }
+            
+            // Handle stats data
+            if (stats.success && !stats.fallback) {
+                this.updateDashboardStats(stats.stats);
+            } else if (stats.fallback) {
+                console.error('Failed to load dashboard stats:', stats.error);
+                this.showStatsError(stats.error);
             }
 
             // Handle files data - use recent files progressive loading
@@ -728,6 +741,31 @@ class ObsidianTagAutomatorApp {
                 this.showNotification('error', 'Dashboard Error', 'Failed to load dashboard data');
                 break;
         }
+    }
+
+    showStatsError(error) {
+        // Show error state in stats cards instead of "-"
+        const statsElements = [
+            'dashboard-total-files',
+            'dashboard-tagged-files', 
+            'dashboard-unique-tags'
+        ];
+        
+        statsElements.forEach(id => {
+            const element = document.getElementById(id);
+            if (element) {
+                element.innerHTML = `
+                    <span class="text-red-400 text-sm">
+                        <i class="fas fa-exclamation-triangle mr-1"></i>
+                        Error
+                    </span>
+                `;
+            }
+        });
+        
+        // Show error notification
+        this.showNotification('error', 'Stats Error', 
+            'Failed to load vault statistics: ' + (error || 'Unknown error'));
     }
 
     updateStatusPanel(status) {
