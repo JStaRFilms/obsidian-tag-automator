@@ -2,8 +2,31 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Custom base styles */
+/* CSS Custom Properties for Design System */
 @layer base {
+  :root {
+    --background: 15 23 42; /* secondary-900 */
+    --foreground: 226 232 240; /* secondary-100 */
+    --muted: 71 85 105; /* secondary-600 */
+    --muted-foreground: 148 163 184; /* secondary-400 */
+    --popover: 30 41 59; /* secondary-800 */
+    --popover-foreground: 226 232 240; /* secondary-100 */
+    --card: 30 41 59; /* secondary-800 */
+    --card-foreground: 226 232 240; /* secondary-100 */
+    --border: 30 41 59; /* secondary-800 */
+    --input: 71 85 105; /* secondary-600 */
+    --primary: 14 165 233; /* primary-500 */
+    --primary-foreground: 255 255 255;
+    --secondary: 71 85 105; /* secondary-600 */
+    --secondary-foreground: 255 255 255;
+    --accent: 71 85 105; /* secondary-600 */
+    --accent-foreground: 255 255 255;
+    --destructive: 239 68 68; /* error-500 */
+    --destructive-foreground: 255 255 255;
+    --ring: 14 165 233; /* primary-500 */
+    --radius: 0.5rem;
+  }
+
   * {
     @apply border-border;
   }
