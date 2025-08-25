@@ -54,3 +54,5 @@ tags_database.json
 config.json
 txt versions/*
 # prompts/
+
+node_modules/
