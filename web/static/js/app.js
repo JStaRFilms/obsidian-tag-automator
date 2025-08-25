@@ -219,10 +219,11 @@ class ObsidianTagAutomatorApp {
                     error: error.message,
                     fallback: true 
                 })),
-                this.apiGet('/stats').catch(error => ({
+                this.apiGet('/stats?include_trends=true').catch(error => ({
                     success: false,
                     error: error.message,
                     stats: {},
+                    trends: {},
                     fallback: true
                 })),
                 this.apiGet('/files/recent?limit=20&offset=0&sort=modified').catch(error => ({ 
@@ -252,9 +253,9 @@ class ObsidianTagAutomatorApp {
                 this.showLoadingError('status');
             }
             
-            // Handle stats data
+            // Handle stats data with trends
             if (stats.success && !stats.fallback) {
-                this.updateDashboardStats(stats.stats);
+                this.updateDashboardStats(stats.stats, stats.trends);
             } else if (stats.fallback) {
                 console.error('Failed to load dashboard stats:', stats.error);
                 this.showStatsError(stats.error);
@@ -803,7 +804,7 @@ class ObsidianTagAutomatorApp {
         }
     }
 
-    updateDashboardStats(stats) {
+    updateDashboardStats(stats, trends) {
         if (!stats) return;
 
         const totalFilesEl = document.getElementById('dashboard-total-files');
@@ -835,14 +836,39 @@ class ObsidianTagAutomatorApp {
             }
         }
 
-        // Update trends (placeholder logic)
-        const totalTrend = document.getElementById('total-files-trend');
-        const taggedTrend = document.getElementById('tagged-files-trend');
-        const uniqueTrend = document.getElementById('unique-tags-trend');
+        // Update trends with proper indicators
+        this.updateTrend('total-files-trend', trends?.total_files);
+        this.updateTrend('tagged-files-trend', trends?.tagged_files);
+        this.updateTrend('unique-tags-trend', trends?.total_tags);
+    }
+    
+    updateTrend(elementId, trend) {
+        const element = document.getElementById(elementId);
+        if (!element) return;
+        
+        if (!trend || trend.direction === undefined) {
+            element.innerHTML = '<i class="fas fa-minus mr-1 text-gray-400"></i> <span class="text-gray-400">No data</span>';
+            return;
+        }
 
-        if (totalTrend) totalTrend.innerHTML = '<i class="fas fa-minus mr-1"></i> No data';
-        if (taggedTrend) taggedTrend.innerHTML = '<i class="fas fa-minus mr-1"></i> No data';
-        if (uniqueTrend) uniqueTrend.innerHTML = '<i class="fas fa-minus mr-1"></i> No data';
+        const { direction, value } = trend;
+        let icon, color, text;
+        
+        if (direction === 'up') {
+            icon = 'fas fa-arrow-up';
+            color = 'text-green-400';
+            text = `${value}% from last scan`;
+        } else if (direction === 'down') {
+            icon = 'fas fa-arrow-down';
+            color = 'text-red-400';
+            text = `${Math.abs(value)}% from last scan`;
+        } else {
+            icon = 'fas fa-minus';
+            color = 'text-yellow-400';
+            text = 'No change from last scan';
+        }
+        
+        element.innerHTML = `<i class="${icon} mr-1 ${color}"></i> <span class="${color}">${text}</span>`;
     }
 
     updateRecentActivity(files) {
@@ -1719,7 +1745,7 @@ class ObsidianTagAutomatorApp {
         // Clear relevant cache entries
         const keysToDelete = [];
         for (const [key] of this.cache) {
-            if (key.includes('/status') || key.includes('/files') || key.includes('/tags')) {
+            if (key.includes('/status') || key.includes('/stats') || key.includes('/files') || key.includes('/tags')) {
                 keysToDelete.push(key);
             }
         }

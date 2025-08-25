@@ -150,116 +150,182 @@
         .tag-chip:hover {
             transform: scale(1.05);
         }
+        
+        /* Fixed Sidebar Layout Styles */
+        .dashboard-container {
+            display: grid;
+            grid-template-columns: 280px 1fr;
+            gap: 1.5rem;
+            max-width: 100%;
+            margin: 0 auto;
+            padding: 2rem 1rem;
+        }
+        
+        .sidebar {
+            position: sticky;
+            top: 2rem;
+            height: calc(100vh - 4rem);
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+        
+        .sidebar-nav {
+            flex: 1;
+        }
+        
+        .status-panel {
+            flex-shrink: 0;
+        }
+        
+        .main-content {
+            min-height: calc(100vh - 4rem);
+        }
+        
+        /* Custom Scrollbar for Sidebar */
+        .sidebar::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        .sidebar::-webkit-scrollbar-track {
+            background: rgba(30, 41, 59, 0.3);
+            border-radius: 3px;
+        }
+        
+        .sidebar::-webkit-scrollbar-thumb {
+            background: rgba(148, 163, 184, 0.5);
+            border-radius: 3px;
+        }
+        
+        .sidebar::-webkit-scrollbar-thumb:hover {
+            background: rgba(148, 163, 184, 0.8);
+        }
+        
+        /* Mobile Responsive */
+        @media (max-width: 1024px) {
+            .dashboard-container {
+                grid-template-columns: 1fr;
+                gap: 1rem;
+                padding: 1rem;
+            }
+            
+            .sidebar {
+                position: relative;
+                top: auto;
+                height: auto;
+                overflow-y: visible;
+            }
+        }
     </style>
 </head>
 <body class="gradient-bg min-h-screen text-gray-100">
-    <!-- Main Container -->
-    <div id="app" class="container mx-auto px-4 py-8">
-        <!-- Header -->
-        <header class="mb-10 text-center">
-            <div class="inline-flex items-center justify-center mb-4">
-                <div class="w-16 h-16 rounded-full bg-blue-500 flex items-center justify-center neon-glow">
-                    <i class="fas fa-tags text-2xl text-white"></i>
-                </div>
+    <!-- Header -->
+    <header class="text-center py-8">
+        <div class="inline-flex items-center justify-center mb-4">
+            <div class="w-16 h-16 rounded-full bg-blue-500 flex items-center justify-center neon-glow">
+                <i class="fas fa-tags text-2xl text-white"></i>
             </div>
-            <h1 class="text-4xl font-bold mb-2 text-blue-300">Obsidian Tag Automator</h1>
-            <p class="text-gray-300 max-w-2xl mx-auto">
-                AI-powered tag management system for your Obsidian vault. Automate tagging, suggest aliases, and maintain consistency across your knowledge base.
-            </p>
-        </header>
+        </div>
+        <h1 class="text-4xl font-bold mb-2 text-blue-300">Obsidian Tag Automator</h1>
+        <p class="text-gray-300 max-w-2xl mx-auto">
+            AI-powered tag management system for your Obsidian vault. Automate tagging, suggest aliases, and maintain consistency across your knowledge base.
+        </p>
+    </header>
 
-        <!-- Main Dashboard -->
-        <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
-            <!-- Sidebar Navigation -->
-            <div class="lg:col-span-1">
-                <div class="glass-effect rounded-xl p-6 mb-6">
-                    <h2 class="text-xl font-semibold mb-4 text-blue-300 flex items-center">
-                        <i class="fas fa-cogs mr-2"></i> Control Panel
-                    </h2>
-                    <nav class="space-y-2" id="navigation">
-                        <a href="#" data-view="dashboard" class="nav-link block py-3 px-4 rounded-lg bg-blue-900/30 hover:bg-blue-800/50 transition-all duration-300 border-l-4 border-blue-500">
-                            <i class="fas fa-home mr-3 text-blue-400"></i> Dashboard
-                        </a>
-                        <a href="#" data-view="automator" class="nav-link block py-3 px-4 rounded-lg hover:bg-slate-700/50 transition-all duration-300">
-                            <i class="fas fa-robot mr-3 text-green-400"></i> Tag Automator
-                        </a>
-                        <a href="#" data-view="aliases" class="nav-link block py-3 px-4 rounded-lg hover:bg-slate-700/50 transition-all duration-300">
-                            <i class="fas fa-code-branch mr-3 text-purple-400"></i> Tag Aliases
-                        </a>
-                        <a href="#" data-view="rename" class="nav-link block py-3 px-4 rounded-lg hover:bg-slate-700/50 transition-all duration-300">
-                            <i class="fas fa-edit mr-3 text-yellow-400"></i> Rename Tags
-                        </a>
-                        <a href="#" data-view="merge" class="nav-link block py-3 px-4 rounded-lg hover:bg-slate-700/50 transition-all duration-300">
-                            <i class="fas fa-object-group mr-3 text-pink-400"></i> Merge Tags
-                        </a>
-                        <a href="#" data-view="delete" class="nav-link block py-3 px-4 rounded-lg hover:bg-slate-700/50 transition-all duration-300">
-                            <i class="fas fa-trash mr-3 text-red-400"></i> Delete Tags
-                        </a>
-                        <a href="#" data-view="validate" class="nav-link block py-3 px-4 rounded-lg hover:bg-slate-700/50 transition-all duration-300">
-                            <i class="fas fa-shield-alt mr-3 text-orange-400"></i> Validate Tags
-                        </a>
-                        <a href="#" data-view="settings" class="nav-link block py-3 px-4 rounded-lg hover:bg-slate-700/50 transition-all duration-300">
-                            <i class="fas fa-sliders-h mr-3 text-cyan-400"></i> Settings
-                        </a>
-                    </nav>
-                </div>
-                
-                <!-- Status Panel -->
-                <div class="glass-effect rounded-xl p-6">
-                    <h3 class="text-lg font-semibold mb-4 text-blue-300 flex items-center">
-                        <i class="fas fa-info-circle mr-2"></i> System Status
-                    </h3>
-                    <div class="space-y-3" id="status-panel">
-                        <div class="flex justify-between items-center">
-                            <span class="text-gray-400">Vault Path:</span>
-                            <span class="text-sm terminal-font text-green-400" id="vault-path">
-                                <div class="skeleton skeleton-text w-32 hidden" id="vault-path-skeleton"></div>
-                                <span id="vault-path-text">Loading...</span>
-                            </span>
-                        </div>
-                        <div class="flex justify-between items-center">
-                            <span class="text-gray-400">AI Status:</span>
-                            <span class="flex items-center" id="ai-status">
-                                <div class="skeleton skeleton-status hidden" id="ai-status-skeleton"></div>
-                                <div class="flex items-center" id="ai-status-content">
-                                    <div class="loading-spinner mr-2"></div>
-                                    <span class="text-yellow-400">Checking...</span>
-                                </div>
-                            </span>
-                        </div>
-                        <div class="flex justify-between items-center">
-                            <span class="text-gray-400">Total Files:</span>
-                            <span class="text-blue-400" id="total-files">
-                                <div class="skeleton skeleton-number hidden" id="total-files-skeleton"></div>
-                                <span id="total-files-text">-</span>
-                            </span>
-                        </div>
-                        <div class="flex justify-between items-center">
-                            <span class="text-gray-400">Tagged Files:</span>
-                            <span class="text-blue-400" id="tagged-files">
-                                <div class="skeleton skeleton-number hidden" id="tagged-files-skeleton"></div>
-                                <span id="tagged-files-text">-</span>
-                            </span>
-                        </div>
-                        <div class="flex justify-between items-center">
-                            <span class="text-gray-400">Unique Tags:</span>
-                            <span class="text-blue-400" id="unique-tags">
-                                <div class="skeleton skeleton-number hidden" id="unique-tags-skeleton"></div>
-                                <span id="unique-tags-text">-</span>
-                            </span>
-                        </div>
-                        <div class="flex justify-between items-center mt-3 pt-3 border-t border-slate-600" id="performance-indicator-container">
-                            <span class="text-gray-400 text-xs">Performance:</span>
-                            <span class="text-xs" id="performance-indicator">
-                                <span class="text-green-400">●</span> Good
-                            </span>
-                        </div>
+    <!-- Main Dashboard Container -->
+    <div id="app" class="dashboard-container">
+        <!-- Fixed Sidebar -->
+        <div class="sidebar">
+            <!-- Navigation Panel -->
+            <div class="glass-effect rounded-xl p-6 sidebar-nav">
+                <h2 class="text-xl font-semibold mb-4 text-blue-300 flex items-center">
+                    <i class="fas fa-cogs mr-2"></i> Control Panel
+                </h2>
+                <nav class="space-y-2" id="navigation">
+                    <a href="#" data-view="dashboard" class="nav-link block py-3 px-4 rounded-lg bg-blue-900/30 hover:bg-blue-800/50 transition-all duration-300 border-l-4 border-blue-500">
+                        <i class="fas fa-home mr-3 text-blue-400"></i> Dashboard
+                    </a>
+                    <a href="#" data-view="automator" class="nav-link block py-3 px-4 rounded-lg hover:bg-slate-700/50 transition-all duration-300">
+                        <i class="fas fa-robot mr-3 text-green-400"></i> Tag Automator
+                    </a>
+                    <a href="#" data-view="aliases" class="nav-link block py-3 px-4 rounded-lg hover:bg-slate-700/50 transition-all duration-300">
+                        <i class="fas fa-code-branch mr-3 text-purple-400"></i> Tag Aliases
+                    </a>
+                    <a href="#" data-view="rename" class="nav-link block py-3 px-4 rounded-lg hover:bg-slate-700/50 transition-all duration-300">
+                        <i class="fas fa-edit mr-3 text-yellow-400"></i> Rename Tags
+                    </a>
+                    <a href="#" data-view="merge" class="nav-link block py-3 px-4 rounded-lg hover:bg-slate-700/50 transition-all duration-300">
+                        <i class="fas fa-object-group mr-3 text-pink-400"></i> Merge Tags
+                    </a>
+                    <a href="#" data-view="delete" class="nav-link block py-3 px-4 rounded-lg hover:bg-slate-700/50 transition-all duration-300">
+                        <i class="fas fa-trash mr-3 text-red-400"></i> Delete Tags
+                    </a>
+                    <a href="#" data-view="validate" class="nav-link block py-3 px-4 rounded-lg hover:bg-slate-700/50 transition-all duration-300">
+                        <i class="fas fa-shield-alt mr-3 text-orange-400"></i> Validate Tags
+                    </a>
+                    <a href="#" data-view="settings" class="nav-link block py-3 px-4 rounded-lg hover:bg-slate-700/50 transition-all duration-300">
+                        <i class="fas fa-sliders-h mr-3 text-cyan-400"></i> Settings
+                    </a>
+                </nav>
+            </div>
+            
+            <!-- Status Panel (Fixed at bottom of sidebar) -->
+            <div class="glass-effect rounded-xl p-6 status-panel">
+                <h3 class="text-lg font-semibold mb-4 text-blue-300 flex items-center">
+                    <i class="fas fa-info-circle mr-2"></i> System Status
+                </h3>
+                <div class="space-y-3" id="status-panel">
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-400">Vault Path:</span>
+                        <span class="text-sm terminal-font text-green-400" id="vault-path">
+                            <div class="skeleton skeleton-text w-32 hidden" id="vault-path-skeleton"></div>
+                            <span id="vault-path-text">Loading...</span>
+                        </span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-400">AI Status:</span>
+                        <span class="flex items-center" id="ai-status">
+                            <div class="skeleton skeleton-status hidden" id="ai-status-skeleton"></div>
+                            <div class="flex items-center" id="ai-status-content">
+                                <div class="loading-spinner mr-2"></div>
+                                <span class="text-yellow-400">Checking...</span>
+                            </div>
+                        </span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-400">Total Files:</span>
+                        <span class="text-blue-400" id="total-files">
+                            <div class="skeleton skeleton-number hidden" id="total-files-skeleton"></div>
+                            <span id="total-files-text">-</span>
+                        </span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-400">Tagged Files:</span>
+                        <span class="text-blue-400" id="tagged-files">
+                            <div class="skeleton skeleton-number hidden" id="tagged-files-skeleton"></div>
+                            <span id="tagged-files-text">-</span>
+                        </span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-400">Unique Tags:</span>
+                        <span class="text-blue-400" id="unique-tags">
+                            <div class="skeleton skeleton-number hidden" id="unique-tags-skeleton"></div>
+                            <span id="unique-tags-text">-</span>
+                        </span>
+                    </div>
+                    <div class="flex justify-between items-center mt-3 pt-3 border-t border-slate-600" id="performance-indicator-container">
+                        <span class="text-gray-400 text-xs">Performance:</span>
+                        <span class="text-xs" id="performance-indicator">
+                            <span class="text-green-400">●</span> Good
+                        </span>
                     </div>
                 </div>
             </div>
-            
-            <!-- Main Content Area -->
-            <div class="lg:col-span-3">
+        </div>
+        
+        <!-- Main Content Area -->
+        <div class="main-content">
                 <!-- Dashboard View -->
                 <div id="dashboard-view" class="view-content">
                     <div class="glass-effect rounded-xl p-6 mb-6 slide-in">

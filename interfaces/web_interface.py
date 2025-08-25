@@ -213,17 +213,26 @@ class ObsidianTagAutomatorWeb:
         
         @self.app.route('/api/stats')
         def get_vault_stats():
-            """Get vault statistics separately for dashboard metrics."""
+            """Get vault statistics with optional trend calculations."""
             try:
+                # Check if trends are requested
+                include_trends = request.args.get('include_trends', 'false').lower() == 'true'
+                
                 # Get vault statistics
-                stats_result = self.automator.get_vault_stats()
+                stats_result = self.automator.get_vault_stats(include_trends=include_trends)
                 
                 if stats_result.get('success', False):
-                    return jsonify({
+                    response = {
                         'success': True,
                         'stats': stats_result['stats'],
                         'timestamp': datetime.now().isoformat()
-                    })
+                    }
+                    
+                    # Add trends if they were calculated
+                    if include_trends and 'trends' in stats_result:
+                        response['trends'] = stats_result['trends']
+                    
+                    return jsonify(response)
                 else:
                     return jsonify({
                         'success': False,

@@ -1,6 +1,7 @@
 import os
 import json
 from pathlib import Path
+from datetime import datetime
 from .config_manager import ConfigManager
 from .ai_integration import AIIntegration
 from .tag_processor import TagProcessor
@@ -600,12 +601,15 @@ Example response format:
             'validation_report': validation_report
         }
 
-    def get_vault_stats(self):
+    def get_vault_stats(self, include_trends=False):
         """
         Returns statistics about the vault with caching to improve performance.
         
+        Args:
+            include_trends (bool): Whether to include trend calculations
+        
         Returns:
-            dict: Vault statistics.
+            dict: Vault statistics with optional trends.
         """
         import time
         
@@ -613,11 +617,21 @@ Example response format:
         current_time = time.time()
         if (self._vault_stats_cache and 
             (current_time - self._vault_stats_cache_timestamp) < self._cache_ttl):
-            return {
+            result = {
                 'success': True,
                 'message': 'Vault statistics retrieved (cached)',
                 'stats': self._vault_stats_cache
             }
+            
+            if include_trends:
+                # Calculate trends even for cached stats
+                historical_stats = self._load_historical_stats()
+                trends = self._calculate_trends(self._vault_stats_cache, historical_stats)
+                result['trends'] = trends
+                # Save current stats as historical for next time
+                self._save_historical_stats(self._vault_stats_cache)
+            
+            return result
         
         stats = {
             'total_files': 0,
@@ -660,11 +674,21 @@ Example response format:
         self._vault_stats_cache = stats
         self._vault_stats_cache_timestamp = current_time
         
-        return {
+        result = {
             'success': True,
             'message': 'Vault statistics retrieved',
             'stats': stats
         }
+        
+        if include_trends:
+            # Calculate trends
+            historical_stats = self._load_historical_stats()
+            trends = self._calculate_trends(stats, historical_stats)
+            result['trends'] = trends
+            # Save current stats as historical for next time
+            self._save_historical_stats(stats)
+        
+        return result
 
     def _should_skip_file(self, file_path, re_tag_option):
         """
@@ -706,3 +730,87 @@ Example response format:
                 return True
                 
         return False
+    
+    def _get_historical_stats_path(self):
+        """
+        Get the path to the historical statistics file.
+        
+        Returns:
+            Path: Path to the historical stats JSON file
+        """
+        return self.vault_path / '.obsidian' / 'automator_stats.json'
+    
+    def _load_historical_stats(self):
+        """
+        Load historical statistics from storage.
+        
+        Returns:
+            dict: Historical statistics or empty dict if not found
+        """
+        stats_path = self._get_historical_stats_path()
+        if stats_path.exists():
+            try:
+                with open(stats_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    return data.get('stats', {})
+            except (json.JSONDecodeError, IOError, KeyError):
+                return {}
+        return {}
+    
+    def _save_historical_stats(self, current_stats):
+        """
+        Save current statistics as historical data.
+        
+        Args:
+            current_stats (dict): Current vault statistics to save
+        """
+        stats_path = self._get_historical_stats_path()
+        stats_path.parent.mkdir(exist_ok=True)
+        
+        historical_data = {
+            'timestamp': datetime.now().isoformat(),
+            'stats': current_stats
+        }
+        
+        try:
+            with open(stats_path, 'w', encoding='utf-8') as f:
+                json.dump(historical_data, f, indent=2)
+        except IOError as e:
+            print(f"Warning: Could not save historical stats: {e}")
+    
+    def _calculate_trends(self, current_stats, historical_stats):
+        """
+        Calculate trends by comparing current stats with historical stats.
+        
+        Args:
+            current_stats (dict): Current vault statistics
+            historical_stats (dict): Historical vault statistics
+        
+        Returns:
+            dict: Trend calculations for each metric
+        """
+        trends = {}
+        
+        # Calculate percentage change for each metric
+        for metric in ['total_files', 'tagged_files', 'total_tags', 'ai_processed_files']:
+            current_value = current_stats.get(metric, 0)
+            historical_value = historical_stats.get(metric, 0)
+            
+            if historical_value > 0:
+                percentage_change = ((current_value - historical_value) / historical_value) * 100
+                trends[metric] = {
+                    'value': round(percentage_change, 1),
+                    'direction': 'up' if percentage_change > 0 else 'down' if percentage_change < 0 else 'same',
+                    'previous_value': historical_value,
+                    'current_value': current_value
+                }
+            else:
+                # No historical data or zero historical value
+                trends[metric] = {
+                    'value': 0,
+                    'direction': 'same',
+                    'previous_value': 0,
+                    'current_value': current_value
+                }
+        
+        return trends
