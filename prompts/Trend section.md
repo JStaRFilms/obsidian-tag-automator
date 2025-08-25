@@ -1,4 +1,4 @@
-Great question! The "No data" section in the dashboard cards is meant to show **trend information** - how the current numbers compare to previous time periods. Let me explain what should be there and how we can implement it.
+ Great question! The "No data" section in the dashboard cards is meant to show **trend information** - how the current numbers compare to previous time periods. Let me explain what should be there and how we can implement it.
 
 ## 📊 What the "No data" Section Represents
 
