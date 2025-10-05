@@ -37,8 +37,8 @@ class AIIntegration:
         if gemini_api_key and genai is not None:
             try:
                 genai.configure(api_key=gemini_api_key)
-                # Using gemini-2.5-flash-lite as it's generally available and cost-effective
-                self.gemini_model = genai.GenerativeModel('gemini-2.5-flash-lite')
+                # Using gemini-2.5-pro for advanced AI analysis
+                self.gemini_model = genai.GenerativeModel('gemini-2.5-pro')
             except Exception as e:
                 self.gemini_model = None
                 print(f"Warning: Failed to configure Gemini API: {e}. AI tag suggestions will not be available.")

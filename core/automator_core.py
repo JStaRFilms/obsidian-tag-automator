@@ -397,6 +397,318 @@ class ObsidianTagAutomatorCore:
         
         return result
 
+    def remove_all_tags_from_folder(self, folder_path):
+        """
+        Removes all tags from all Markdown files in a specific folder and its subfolders.
+
+        Args:
+            folder_path (str or Path): Path to the folder (relative to vault root or absolute)
+
+        Returns:
+            dict: Result containing success status and files modified.
+        """
+        # Normalize the folder path to be relative to vault root
+        folder_path = Path(folder_path)
+        if folder_path.is_absolute():
+            try:
+                folder_path = folder_path.relative_to(self.vault_path)
+            except ValueError:
+                return {
+                    'success': False,
+                    'message': f'Folder path {folder_path} is not within the vault {self.vault_path}',
+                    'files_modified': 0
+                }
+
+        # Ensure the folder exists
+        full_folder_path = self.vault_path / folder_path
+        if not full_folder_path.exists() or not full_folder_path.is_dir():
+            return {
+                'success': False,
+                'message': f'Folder {full_folder_path} does not exist or is not a directory',
+                'files_modified': 0
+            }
+
+        result = {
+            'success': True,
+            'message': '',
+            'files_modified': 0,
+            'files_processed': 0,
+            'failed_files': []
+        }
+
+        try:
+            # Walk through the specified folder
+            for root, _, files in os.walk(full_folder_path):
+                for file in files:
+                    file_path = Path(root) / file
+                    if file_path.suffix.lower() == '.md' and '.obsidian' not in file_path.parts:
+                        result['files_processed'] += 1
+
+                        try:
+                            front_matter_raw, main_content = self.tag_processor._extract_front_matter_and_content(file_path)
+                            if not front_matter_raw:
+                                continue  # No front matter to modify
+
+                            parsed_front_matter = self.tag_processor._parse_front_matter(front_matter_raw)
+
+                            # Check if file has tags
+                            if 'tags' in parsed_front_matter and parsed_front_matter['tags']:
+                                # Remove all tags
+                                parsed_front_matter['tags'] = []
+
+                                # Also remove ai_processed flag so files can be re-tagged normally
+                                if 'ai_processed' in parsed_front_matter:
+                                    del parsed_front_matter['ai_processed']
+
+                                # Write back to file
+                                self.tag_processor.write_file_with_updated_tags(file_path, [], main_content, parsed_front_matter)
+                                result['files_modified'] += 1
+
+                        except Exception as e:
+                            result['failed_files'].append({
+                                'file_path': str(file_path),
+                                'error': str(e)
+                            })
+
+            result['message'] = f"Removed all tags from {result['files_modified']} files in folder '{folder_path}'"
+
+        except Exception as e:
+            result['success'] = False
+            result['message'] = f"Error removing tags from folder: {str(e)}"
+
+        return result
+
+    def generate_ai_suggested_merges(self):
+        """
+        Uses AI to analyze existing tags and suggest semantic merges (not just aliases).
+
+        Returns:
+            dict: Result containing AI-suggested merges.
+        """
+        if not self.ai_integration.gemini_model:
+            return {
+                'success': False,
+                'message': 'Gemini API not configured. Cannot generate AI-suggested merges.',
+                'suggested_merges': {}
+            }
+
+        all_tags = self.get_all_tags()
+        if len(all_tags) < 2:
+            return {
+                'success': False,
+                'message': 'Need at least 2 tags to suggest merges.',
+                'suggested_merges': {}
+            }
+
+        # Create a prompt for the AI to suggest tag merges
+        prompt = f"""
+You are an AI assistant for analyzing tag semantics in an Obsidian vault. Your goal is to identify tags that represent the same or very similar concepts and should be merged.
+
+Here is the list of all tags in the vault:
+{', '.join(sorted(all_tags))}
+
+Instructions:
+1. Identify groups of tags that represent the same concept (e.g., 'javascript', 'js', 'ecmascript' could all merge to 'javascript').
+2. For each group, choose the most standard/professional/canonical tag name as the target.
+3. Return a JSON object where each key is a tag to be merged FROM, and each value is the tag to merge TO.
+4. Only suggest merges where you are highly confident the tags represent the same concept.
+5. Do not suggest merging tags that are truly different concepts.
+6. Format your response as a valid JSON object only, with no additional text.
+
+Example response format:
+{{
+  "js": "javascript",
+  "ecmascript": "javascript",
+  "py": "python",
+  "c-sharp": "csharp",
+  "c++": "cpp"
+}}
+"""
+
+        try:
+            response = self.ai_integration.gemini_model.generate_content(prompt)
+            response_text = response.text.strip()
+
+            # Debug: Log the raw response
+            print(f"DEBUG: AI response length: {len(response_text)}")
+            if len(response_text) < 200:
+                print(f"DEBUG: AI response content: '{response_text}'")
+            else:
+                print(f"DEBUG: AI response preview: '{response_text[:200]}...'")
+
+            # Clean markdown code blocks if present
+            if response_text.startswith('```json'):
+                response_text = response_text[7:]  # Remove ```json
+            if response_text.startswith('```'):
+                response_text = response_text[3:]  # Remove ```
+            if response_text.endswith('```'):
+                response_text = response_text[:-3]  # Remove trailing ```
+            response_text = response_text.strip()
+
+            # Try to parse the response as JSON
+            try:
+                suggested_merges = json.loads(response_text)
+                # Validate that the response is a dictionary
+                if not isinstance(suggested_merges, dict):
+                    return {
+                        'success': False,
+                        'message': 'AI response is not a valid dictionary.',
+                        'suggested_merges': {}
+                    }
+
+                # Clean and validate the suggested merges
+                cleaned_merges = {}
+                for from_tag, to_tag in suggested_merges.items():
+                    cleaned_from = self.tag_processor._clean_tag_format(from_tag)
+                    cleaned_to = self.tag_processor._clean_tag_format(to_tag)
+
+                    # Validate that both tags exist and are different
+                    if (cleaned_from in all_tags and cleaned_to in all_tags and
+                        cleaned_from != cleaned_to):
+                        cleaned_merges[cleaned_from] = cleaned_to
+
+                return {
+                    'success': True,
+                    'message': f"AI suggested {len(cleaned_merges)} tag merges.",
+                    'suggested_merges': cleaned_merges
+                }
+
+            except json.JSONDecodeError as e:
+                return {
+                    'success': False,
+                    'message': f'Failed to parse AI response as JSON: {e}',
+                    'suggested_merges': {}
+                }
+
+        except Exception as e:
+            return {
+                'success': False,
+                'message': f'Error getting AI suggested merges: {e}',
+                'suggested_merges': {}
+            }
+
+    def generate_ai_suggested_deletions(self):
+        """
+        Uses AI to analyze existing tags and suggest which ones should be deleted as redundant or low-value.
+
+        Returns:
+            dict: Result containing AI-suggested deletions.
+        """
+        if not self.ai_integration.gemini_model:
+            return {
+                'success': False,
+                'message': 'Gemini API not configured. Cannot generate AI-suggested deletions.',
+                'suggested_deletions': []
+            }
+
+        all_tags = self.get_all_tags()
+        if not all_tags:
+            return {
+                'success': False,
+                'message': 'No tags found to analyze.',
+                'suggested_deletions': []
+            }
+
+        # Get tag usage statistics
+        tag_usage = {}
+        for root, _, files in os.walk(self.vault_path):
+            for file in files:
+                file_path = Path(root) / file
+                if file_path.suffix.lower() == '.md' and '.obsidian' not in file_path.parts:
+                    try:
+                        front_matter_raw, _ = self.tag_processor._extract_front_matter_and_content(file_path)
+                        if front_matter_raw:
+                            parsed_front_matter = self.tag_processor._parse_front_matter(front_matter_raw)
+                            file_tags = parsed_front_matter.get('tags', [])
+                            for tag in file_tags:
+                                cleaned_tag = self.tag_processor._clean_tag_format(tag)
+                                tag_usage[cleaned_tag] = tag_usage.get(cleaned_tag, 0) + 1
+                    except Exception:
+                        continue
+
+        # Create usage info for AI
+        usage_info = []
+        for tag in sorted(all_tags):
+            usage_count = tag_usage.get(tag, 0)
+            usage_info.append(f"{tag} ({usage_count} files)")
+
+        prompt = f"""
+You are an AI assistant for analyzing tag quality in an Obsidian vault. Your goal is to identify tags that should be deleted because they are redundant, too generic, or low-value.
+
+Here is the list of all tags with their usage counts:
+{', '.join(usage_info)}
+
+Instructions:
+1. Identify tags that are too generic or meaningless (e.g., 'stuff', 'things', 'misc', 'test', 'temp').
+2. Identify redundant tags that don't add value (e.g., 'note', 'file', 'document').
+3. Identify tags used in very few files (1-2 files) that might be typos or one-off experiments.
+4. Do NOT suggest deleting tags that are specific and meaningful, even if used infrequently.
+5. Return a JSON array of tag names that should be deleted.
+6. Be conservative - only suggest deletion for tags that are clearly problematic.
+7. Format your response as a valid JSON array only, with no additional text.
+
+Example response format:
+["stuff", "things", "misc", "test", "note"]
+"""
+
+        try:
+            response = self.ai_integration.gemini_model.generate_content(prompt)
+            response_text = response.text.strip()
+
+            # Debug: Log the raw response
+            print(f"DEBUG: AI response length: {len(response_text)}")
+            if len(response_text) < 200:
+                print(f"DEBUG: AI response content: '{response_text}'")
+            else:
+                print(f"DEBUG: AI response preview: '{response_text[:200]}...'")
+
+            # Clean markdown code blocks if present
+            if response_text.startswith('```json'):
+                response_text = response_text[7:]  # Remove ```json
+            if response_text.startswith('```'):
+                response_text = response_text[3:]  # Remove ```
+            if response_text.endswith('```'):
+                response_text = response_text[:-3]  # Remove trailing ```
+            response_text = response_text.strip()
+
+            # Try to parse the response as JSON
+            try:
+                suggested_deletions = json.loads(response_text)
+                # Validate that the response is a list
+                if not isinstance(suggested_deletions, list):
+                    return {
+                        'success': False,
+                        'message': 'AI response is not a valid array.',
+                        'suggested_deletions': []
+                    }
+
+                # Clean and validate the suggested deletions
+                cleaned_deletions = []
+                for tag in suggested_deletions:
+                    cleaned_tag = self.tag_processor._clean_tag_format(tag)
+                    if cleaned_tag in all_tags:
+                        cleaned_deletions.append(cleaned_tag)
+
+                return {
+                    'success': True,
+                    'message': f"AI suggested deleting {len(cleaned_deletions)} tags.",
+                    'suggested_deletions': cleaned_deletions
+                }
+
+            except json.JSONDecodeError as e:
+                return {
+                    'success': False,
+                    'message': f'Failed to parse AI response as JSON: {e}',
+                    'suggested_deletions': []
+                }
+
+        except Exception as e:
+            return {
+                'success': False,
+                'message': f'Error getting AI suggested deletions: {e}',
+                'suggested_deletions': []
+            }
+
     def generate_suggested_aliases(self):
         """
         Generates suggested tag aliases by comparing all existing tags in the vault.
@@ -500,7 +812,23 @@ Example response format:
         try:
             response = self.ai_integration.gemini_model.generate_content(prompt)
             response_text = response.text.strip()
-            
+
+            # Debug: Log the raw response
+            print(f"DEBUG: AI response length: {len(response_text)}")
+            if len(response_text) < 200:
+                print(f"DEBUG: AI response content: '{response_text}'")
+            else:
+                print(f"DEBUG: AI response preview: '{response_text[:200]}...'")
+
+            # Clean markdown code blocks if present
+            if response_text.startswith('```json'):
+                response_text = response_text[7:]  # Remove ```json
+            if response_text.startswith('```'):
+                response_text = response_text[3:]  # Remove ```
+            if response_text.endswith('```'):
+                response_text = response_text[:-3]  # Remove trailing ```
+            response_text = response_text.strip()
+
             # Try to parse the response as JSON
             try:
                 suggested_aliases = json.loads(response_text)
@@ -693,23 +1021,28 @@ Example response format:
     def _should_skip_file(self, file_path, re_tag_option):
         """
         Determines whether a given Markdown file should be skipped during the tagging process.
-        
+
         Args:
             file_path (Path): The full path to the Markdown file being considered.
             re_tag_option (str): A string indicating the re-tagging preference.
-            
+
         Returns:
             bool: True if the file should be skipped, False otherwise.
         """
         # Check if file path is excluded
         relative_file_path = str(file_path.relative_to(self.vault_path)).replace('\\', '/')
-        relative_file_path_parts = relative_file_path.split('/')
-        
+
         for excluded_path_str in self.excluded_paths:
-            excluded_path_parts = excluded_path_str.split('/')
-            # Check if the excluded path is a prefix of the file path's components
-            if len(relative_file_path_parts) >= len(excluded_path_parts) and \
-               relative_file_path_parts[:len(excluded_path_parts)] == excluded_path_parts:
+            # Normalize the excluded path to be relative to vault root
+            if excluded_path_str.startswith(str(self.vault_path)):
+                # Convert absolute path to relative
+                excluded_relative = str(Path(excluded_path_str).relative_to(self.vault_path)).replace('\\', '/')
+            else:
+                # Already relative, use as-is
+                excluded_relative = excluded_path_str.replace('\\', '/')
+
+            # Check if the file path starts with the excluded path
+            if relative_file_path.startswith(excluded_relative):
                 return True
         
         # Get front matter to check re-tagging options

@@ -54,7 +54,8 @@ class AgenticUI:
         return Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
-            self.console
+            *Progress.get_default_columns(),
+            console=self.console
         )
     
     def get_user_choice(self, prompt, options=None):
